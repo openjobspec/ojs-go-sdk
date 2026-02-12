@@ -1,5 +1,9 @@
 # ojs-go-sdk
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/openjobspec/ojs-go-sdk.svg)](https://pkg.go.dev/github.com/openjobspec/ojs-go-sdk)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/openjobspec/ojs-go-sdk)](https://go.dev/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+
 The official Go SDK for [Open Job Spec (OJS)](https://openjobspec.org) -- a vendor-neutral, language-agnostic specification for background job processing.
 
 ## Features
