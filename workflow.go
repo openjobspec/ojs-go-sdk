@@ -3,6 +3,7 @@ package ojs
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"time"
 )
 
@@ -230,7 +231,7 @@ func (c *Client) GetWorkflow(ctx context.Context, id string) (*Workflow, error) 
 	var resp struct {
 		Workflow Workflow `json:"workflow"`
 	}
-	path := fmt.Sprintf("%s/workflows/%s", basePath, id)
+	path := fmt.Sprintf("%s/workflows/%s", basePath, url.PathEscape(id))
 	if err := c.transport.get(ctx, path, &resp); err != nil {
 		return nil, err
 	}
@@ -242,7 +243,7 @@ func (c *Client) CancelWorkflow(ctx context.Context, id string) (*Workflow, erro
 	var resp struct {
 		Workflow Workflow `json:"workflow"`
 	}
-	path := fmt.Sprintf("%s/workflows/%s", basePath, id)
+	path := fmt.Sprintf("%s/workflows/%s", basePath, url.PathEscape(id))
 	if err := c.transport.delete(ctx, path, &resp); err != nil {
 		return nil, err
 	}

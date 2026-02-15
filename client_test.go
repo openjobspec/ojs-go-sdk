@@ -463,3 +463,29 @@ func TestJobJSONRoundTrip(t *testing.T) {
 		t.Errorf("expected 1 arg, got %d", len(args))
 	}
 }
+
+func TestGetJobURLEncoding(t *testing.T) {
+	var receivedURI string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedURI = r.RequestURI
+		w.Header().Set("Content-Type", ojsContentType)
+		json.NewEncoder(w).Encode(map[string]any{
+			"job": map[string]any{
+				"id": "id/with/slashes", "type": "test", "state": "available",
+				"args": []any{}, "queue": "default", "attempt": 0, "max_attempts": 3,
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, _ := NewClient(server.URL)
+	_, err := client.GetJob(context.Background(), "id/with/slashes")
+	if err != nil {
+		t.Fatalf("GetJob() error = %v", err)
+	}
+	expected := "/ojs/v1/jobs/id%2Fwith%2Fslashes"
+	if receivedURI != expected {
+		t.Errorf("expected URI %q, got %q", expected, receivedURI)
+	}
+}

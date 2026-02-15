@@ -3,6 +3,7 @@ package ojs
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"time"
 )
 
@@ -69,7 +70,7 @@ func (c *Client) GetQueueStats(ctx context.Context, name string) (*QueueStats, e
 		} `json:"stats"`
 		ComputedAt string `json:"computed_at"`
 	}
-	path := fmt.Sprintf("%s/queues/%s/stats", basePath, name)
+	path := fmt.Sprintf("%s/queues/%s/stats", basePath, url.PathEscape(name))
 	if err := c.transport.get(ctx, path, &resp); err != nil {
 		return nil, err
 	}
@@ -92,12 +93,12 @@ func (c *Client) GetQueueStats(ctx context.Context, name string) (*QueueStats, e
 
 // PauseQueue pauses a queue, preventing workers from fetching new jobs.
 func (c *Client) PauseQueue(ctx context.Context, name string) error {
-	path := fmt.Sprintf("%s/queues/%s/pause", basePath, name)
+	path := fmt.Sprintf("%s/queues/%s/pause", basePath, url.PathEscape(name))
 	return c.transport.post(ctx, path, nil, nil)
 }
 
 // ResumeQueue resumes a paused queue.
 func (c *Client) ResumeQueue(ctx context.Context, name string) error {
-	path := fmt.Sprintf("%s/queues/%s/resume", basePath, name)
+	path := fmt.Sprintf("%s/queues/%s/resume", basePath, url.PathEscape(name))
 	return c.transport.post(ctx, path, nil, nil)
 }
