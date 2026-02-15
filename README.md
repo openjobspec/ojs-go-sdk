@@ -275,6 +275,7 @@ if ojs.IsRetryable(err) {
 | `WithHeartbeatInterval(d)` | Heartbeat interval (default: `5s`) |
 | `WithLabels(l...)` | Worker labels |
 | `WithPollInterval(d)` | Fetch poll interval (default: `1s`) |
+| `WithLogger(l)` | Structured logger (`*slog.Logger`) for operational events |
 
 ## OJS Spec Conformance
 
