@@ -58,6 +58,11 @@ When reporting bugs, include:
 - OJS server version and backend
 - Minimal reproduction steps
 
+## Discussions
+
+For questions, ideas, and RFCs, use [GitHub Discussions](https://github.com/openjobspec/ojs-go-sdk/discussions).
+Reserve issues for actionable bug reports and feature requests.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the Apache 2.0 license.

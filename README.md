@@ -3,6 +3,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/openjobspec/ojs-go-sdk.svg)](https://pkg.go.dev/github.com/openjobspec/ojs-go-sdk)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/openjobspec/ojs-go-sdk)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![CI](https://github.com/openjobspec/ojs-go-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/openjobspec/ojs-go-sdk/actions/workflows/ci.yml)
 
 The official Go SDK for [Open Job Spec (OJS)](https://openjobspec.org) -- a vendor-neutral, language-agnostic specification for background job processing.
 
@@ -14,6 +15,51 @@ The official Go SDK for [Open Job Spec (OJS)](https://openjobspec.org) -- a vend
 - **Middleware**: Composable middleware chain for cross-cutting concerns
 - **Structured errors**: Full `errors.Is`/`errors.As` support with OJS error codes
 - **Zero dependencies**: Only the Go standard library
+
+## Architecture
+
+### Client → Server Flow
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant Client as ojs.Client
+    participant Transport as HTTP Transport
+    participant Server as OJS Server
+
+    App->>Client: Enqueue(ctx, "email.send", args)
+    Client->>Client: Validate job type & args
+    Client->>Transport: POST /ojs/v1/jobs
+    Transport->>Server: HTTP request (application/openjobspec+json)
+    Server-->>Transport: 201 Created {job}
+    Transport-->>Client: *Job
+    Client-->>App: *Job, nil
+```
+
+### Worker Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Running: Start(ctx)
+    Running --> Running: Fetch → Process → ACK/NACK
+    Running --> Quiet: Server directive
+    Quiet --> Running: Server directive
+    Quiet --> Terminate: Server directive / ctx.Done()
+    Running --> Terminate: ctx.Done()
+    Terminate --> [*]: Grace period expires or all jobs complete
+```
+
+### Middleware Chain (Onion Model)
+
+```mermaid
+flowchart LR
+    Request([Job Fetched]) --> MW1[Middleware 1\nbefore]
+    MW1 --> MW2[Middleware 2\nbefore]
+    MW2 --> Handler[Handler]
+    Handler --> MW2A[Middleware 2\nafter]
+    MW2A --> MW1A[Middleware 1\nafter]
+    MW1A --> Result([ACK / NACK])
+```
 
 ## Installation
 
@@ -98,6 +144,33 @@ func main() {
     if err := worker.Start(ctx); err != nil {
         log.Fatal(err)
     }
+}
+```
+
+### Pre-built Middleware
+
+The `middleware` package provides ready-to-use middleware for common cross-cutting concerns:
+
+```go
+import "github.com/openjobspec/ojs-go-sdk/middleware"
+
+// Structured logging via log/slog.
+worker.Use(middleware.Logging(slog.Default()))
+
+// Panic recovery — converts panics to errors.
+worker.Use(middleware.Recovery(slog.Default()))
+
+// Metrics — implement the MetricsRecorder interface for your backend.
+worker.Use(middleware.Metrics(myRecorder))
+```
+
+The `MetricsRecorder` interface is backend-agnostic:
+
+```go
+type MetricsRecorder interface {
+    JobStarted(jobType, queue string)
+    JobCompleted(jobType, queue string, duration time.Duration)
+    JobFailed(jobType, queue string, duration time.Duration)
 }
 ```
 
