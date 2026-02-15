@@ -354,3 +354,130 @@ func TestMiddlewareChainOperations(t *testing.T) {
 		}
 	}
 }
+
+func TestMiddlewareInsertBefore(t *testing.T) {
+	chain := newMiddlewareChain()
+	noop := func(ctx JobContext, next HandlerFunc) error { return next(ctx) }
+
+	chain.Add("a", noop)
+	chain.Add("c", noop)
+
+	// Insert "b" before "c".
+	chain.InsertBefore("c", "b", noop)
+
+	if len(chain.middleware) != 3 {
+		t.Fatalf("expected 3, got %d", len(chain.middleware))
+	}
+	names := make([]string, len(chain.middleware))
+	for i, m := range chain.middleware {
+		names[i] = m.name
+	}
+	expected := []string{"a", "b", "c"}
+	for i, name := range expected {
+		if names[i] != name {
+			t.Errorf("position %d: expected %s, got %s (order: %v)", i, name, names[i], names)
+		}
+	}
+}
+
+func TestMiddlewareInsertBeforeNotFound(t *testing.T) {
+	chain := newMiddlewareChain()
+	noop := func(ctx JobContext, next HandlerFunc) error { return next(ctx) }
+
+	chain.Add("a", noop)
+
+	// Insert before non-existent target should append.
+	chain.InsertBefore("nonexistent", "b", noop)
+
+	if len(chain.middleware) != 2 {
+		t.Fatalf("expected 2, got %d", len(chain.middleware))
+	}
+	if chain.middleware[1].name != "b" {
+		t.Errorf("expected b appended at end, got %s", chain.middleware[1].name)
+	}
+}
+
+func TestMiddlewareInsertAfter(t *testing.T) {
+	chain := newMiddlewareChain()
+	noop := func(ctx JobContext, next HandlerFunc) error { return next(ctx) }
+
+	chain.Add("a", noop)
+	chain.Add("c", noop)
+
+	// Insert "b" after "a".
+	chain.InsertAfter("a", "b", noop)
+
+	if len(chain.middleware) != 3 {
+		t.Fatalf("expected 3, got %d", len(chain.middleware))
+	}
+	names := make([]string, len(chain.middleware))
+	for i, m := range chain.middleware {
+		names[i] = m.name
+	}
+	expected := []string{"a", "b", "c"}
+	for i, name := range expected {
+		if names[i] != name {
+			t.Errorf("position %d: expected %s, got %s (order: %v)", i, name, names[i], names)
+		}
+	}
+}
+
+func TestMiddlewareInsertAfterNotFound(t *testing.T) {
+	chain := newMiddlewareChain()
+	noop := func(ctx JobContext, next HandlerFunc) error { return next(ctx) }
+
+	chain.Add("a", noop)
+
+	// Insert after non-existent target should append.
+	chain.InsertAfter("nonexistent", "b", noop)
+
+	if len(chain.middleware) != 2 {
+		t.Fatalf("expected 2, got %d", len(chain.middleware))
+	}
+	if chain.middleware[1].name != "b" {
+		t.Errorf("expected b appended at end, got %s", chain.middleware[1].name)
+	}
+}
+
+func TestMiddlewareInsertBeforeAfterExecution(t *testing.T) {
+	var order []string
+	chain := newMiddlewareChain()
+
+	chain.Add("first", func(ctx JobContext, next HandlerFunc) error {
+		order = append(order, "first")
+		return next(ctx)
+	})
+	chain.Add("third", func(ctx JobContext, next HandlerFunc) error {
+		order = append(order, "third")
+		return next(ctx)
+	})
+
+	// Insert "second" after "first".
+	chain.InsertAfter("first", "second", func(ctx JobContext, next HandlerFunc) error {
+		order = append(order, "second")
+		return next(ctx)
+	})
+
+	// Insert "zeroth" before "first".
+	chain.InsertBefore("first", "zeroth", func(ctx JobContext, next HandlerFunc) error {
+		order = append(order, "zeroth")
+		return next(ctx)
+	})
+
+	handler := chain.then(func(ctx JobContext) error {
+		order = append(order, "handler")
+		return nil
+	})
+
+	handler(JobContext{})
+
+	expected := []string{"zeroth", "first", "second", "third", "handler"}
+	if len(order) != len(expected) {
+		t.Fatalf("expected %d calls, got %d: %v", len(expected), len(order), order)
+	}
+	for i, v := range expected {
+		if order[i] != v {
+			t.Errorf("expected order[%d]=%s, got %s", i, v, order[i])
+		}
+	}
+}
