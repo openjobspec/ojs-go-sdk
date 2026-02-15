@@ -94,7 +94,8 @@ type batchResponse struct {
 //	    ojs.WithRetry(ojs.RetryPolicy{MaxAttempts: 5}),
 //	)
 func (c *Client) Enqueue(ctx context.Context, jobType string, args Args, opts ...EnqueueOption) (*Job, error) {
-	if err := validateEnqueueParams(jobType, argsToWire(args)); err != nil {
+	wireArgs := argsToWire(args)
+	if err := validateEnqueueParams(jobType, wireArgs); err != nil {
 		return nil, err
 	}
 	cfg := resolveEnqueueConfig(opts)
@@ -104,7 +105,7 @@ func (c *Client) Enqueue(ctx context.Context, jobType string, args Args, opts ..
 
 	req := enqueueRequest{
 		Type: jobType,
-		Args: argsToWire(args),
+		Args: wireArgs,
 		Meta: cfg.meta,
 	}
 	req.Options = buildWireOptions(cfg)
@@ -127,7 +128,8 @@ func (c *Client) Enqueue(ctx context.Context, jobType string, args Args, opts ..
 func (c *Client) EnqueueBatch(ctx context.Context, requests []JobRequest) ([]Job, error) {
 	wireJobs := make([]enqueueRequest, len(requests))
 	for i, r := range requests {
-		if err := validateEnqueueParams(r.Type, argsToWire(r.Args)); err != nil {
+		wireArgs := argsToWire(r.Args)
+		if err := validateEnqueueParams(r.Type, wireArgs); err != nil {
 			return nil, fmt.Errorf("job[%d]: %w", i, err)
 		}
 		cfg := resolveEnqueueConfig(r.Options)
@@ -136,7 +138,7 @@ func (c *Client) EnqueueBatch(ctx context.Context, requests []JobRequest) ([]Job
 		}
 		wireJobs[i] = enqueueRequest{
 			Type:    r.Type,
-			Args:    argsToWire(r.Args),
+			Args:    wireArgs,
 			Meta:    cfg.meta,
 			Options: buildWireOptions(cfg),
 		}
