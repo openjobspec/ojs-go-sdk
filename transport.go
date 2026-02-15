@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	ojsContentType = "application/openjobspec+json"
-	ojsVersion     = "1.0.0-rc.1"
-	basePath       = "/ojs/v1"
+	ojsContentType     = "application/openjobspec+json"
+	ojsVersion         = "1.0.0-rc.1"
+	basePath           = "/ojs/v1"
+	maxResponseBodyLen = 10 << 20 // 10 MB
 )
 
 // transport is a thin HTTP wrapper for OJS API communication.
@@ -66,7 +67,9 @@ func (t *transport) do(ctx context.Context, method, path string, body any, resul
 		return fmt.Errorf("ojs: create request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", ojsContentType)
+	if body != nil {
+		req.Header.Set("Content-Type", ojsContentType)
+	}
 	req.Header.Set("Accept", ojsContentType)
 	req.Header.Set("OJS-Version", ojsVersion)
 
@@ -83,7 +86,7 @@ func (t *transport) do(ctx context.Context, method, path string, body any, resul
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyLen))
 	if err != nil {
 		return fmt.Errorf("ojs: read response: %w", err)
 	}
