@@ -30,7 +30,7 @@ func TestListQueues(t *testing.T) {
 	defer server.Close()
 
 	client, _ := NewClient(server.URL)
-	queues, err := client.ListQueues(context.Background())
+	queues, pagination, err := client.ListQueues(context.Background())
 	if err != nil {
 		t.Fatalf("ListQueues() error = %v", err)
 	}
@@ -42,6 +42,12 @@ func TestListQueues(t *testing.T) {
 	}
 	if queues[1].Name != "email" {
 		t.Errorf("expected second queue name=email, got %s", queues[1].Name)
+	}
+	if pagination.Total != 2 {
+		t.Errorf("expected pagination total=2, got %d", pagination.Total)
+	}
+	if pagination.Limit != 50 {
+		t.Errorf("expected pagination limit=50, got %d", pagination.Limit)
 	}
 }
 

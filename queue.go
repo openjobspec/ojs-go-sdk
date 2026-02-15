@@ -38,16 +38,16 @@ type Pagination struct {
 	HasMore bool `json:"has_more"`
 }
 
-// ListQueues returns the list of all known queues.
-func (c *Client) ListQueues(ctx context.Context) ([]Queue, error) {
+// ListQueues returns the list of all known queues with pagination metadata.
+func (c *Client) ListQueues(ctx context.Context) ([]Queue, *Pagination, error) {
 	var resp struct {
 		Queues     []Queue    `json:"queues"`
 		Pagination Pagination `json:"pagination"`
 	}
 	if err := c.transport.get(ctx, basePath+"/queues", &resp); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return resp.Queues, nil
+	return resp.Queues, &resp.Pagination, nil
 }
 
 // GetQueueStats returns detailed statistics for a queue.
