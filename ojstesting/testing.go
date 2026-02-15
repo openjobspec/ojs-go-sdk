@@ -1,14 +1,20 @@
-// Package testing provides test utilities for OJS applications.
+// Package ojstesting provides test utilities for OJS applications.
 //
 // It implements the OJS Testing Specification (ojs-testing.md) with
 // fake mode, assertion helpers, and queue drain utilities.
 //
-// Usage:
+// # Fake Mode
+//
+// Use [Fake] to activate the in-memory store and [FakeClient] to get a
+// real [ojs.Client] that records enqueues without any HTTP server:
 //
 //	func TestSignup(t *testing.T) {
-//	    ctx := ojstesting.Fake(t)
-//	    signupUser(ctx, "user@example.com")
-//	    ojstesting.AssertEnqueued(t, "email.send", ojstesting.MatchArgs(map[string]any{"to": "user@example.com"}))
+//	    _ = ojstesting.Fake(t)
+//	    client := ojstesting.FakeClient(t)
+//	    signupService(client, "user@example.com")
+//	    ojstesting.AssertEnqueued(t, "email.send",
+//	        ojstesting.MatchArgs(map[string]any{"to": "user@example.com"}),
+//	    )
 //	}
 package ojstesting
 
