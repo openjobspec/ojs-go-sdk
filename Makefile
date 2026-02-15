@@ -1,4 +1,4 @@
-.PHONY: test lint cover vet clean
+.PHONY: test lint cover vet bench clean
 
 # Run all tests with race detection.
 test:
@@ -15,9 +15,14 @@ cover:
 vet:
 	go vet ./...
 
-# Run all linters (vet + staticcheck if available).
+# Run all linters (vet + staticcheck).
 lint: vet
-	@which staticcheck > /dev/null 2>&1 && staticcheck ./... || echo "staticcheck not installed, skipping (go install honnef.co/go/tools/cmd/staticcheck@latest)"
+	@which staticcheck > /dev/null 2>&1 || (echo "Installing staticcheck..." && go install honnef.co/go/tools/cmd/staticcheck@latest)
+	staticcheck ./...
+
+# Run benchmarks.
+bench:
+	go test ./... -bench=. -benchmem -run='^$$' -count=1
 
 # Remove build artifacts.
 clean:
