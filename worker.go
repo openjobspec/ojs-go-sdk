@@ -74,6 +74,18 @@ func (jc JobContext) Heartbeat() error {
 	return jc.worker.sendHeartbeat(jc.ctx)
 }
 
+// NewJobContextForTest creates a JobContext suitable for use in tests.
+// It initialises the internal context to context.Background().
+// This is intended only for testing middleware or handlers outside a Worker.
+func NewJobContextForTest(job Job) JobContext {
+	return JobContext{
+		Job:     job,
+		Attempt: job.Attempt,
+		Queue:   job.Queue,
+		ctx:     context.Background(),
+	}
+}
+
 // Worker is an OJS worker that fetches and processes jobs from an OJS server.
 // It supports configurable concurrency, middleware, and graceful shutdown.
 type Worker struct {
