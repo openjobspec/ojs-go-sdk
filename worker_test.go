@@ -481,3 +481,27 @@ func TestMiddlewareInsertBeforeAfterExecution(t *testing.T) {
 		}
 	}
 }
+
+func TestFetchBackoff(t *testing.T) {
+	base := 1 * time.Second
+
+	// First error: use base interval.
+	if got := fetchBackoff(1, base); got != base {
+		t.Errorf("fetchBackoff(1) = %v, want %v", got, base)
+	}
+
+	// Second error: 2x base.
+	if got := fetchBackoff(2, base); got != 2*base {
+		t.Errorf("fetchBackoff(2) = %v, want %v", got, 2*base)
+	}
+
+	// Third error: 4x base.
+	if got := fetchBackoff(3, base); got != 4*base {
+		t.Errorf("fetchBackoff(3) = %v, want %v", got, 4*base)
+	}
+
+	// Large error count: capped at maxFetchBackoff.
+	if got := fetchBackoff(100, base); got != maxFetchBackoff {
+		t.Errorf("fetchBackoff(100) = %v, want %v", got, maxFetchBackoff)
+	}
+}

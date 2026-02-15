@@ -237,6 +237,7 @@ func (w *Worker) State() WorkerState {
 // fetchLoop is the main loop that fetches and dispatches jobs.
 func (w *Worker) fetchLoop(ctx context.Context) {
 	sem := make(chan struct{}, w.config.concurrency)
+	consecutiveErrors := 0
 
 	for {
 		select {
@@ -277,17 +278,20 @@ func (w *Worker) fetchLoop(ctx context.Context) {
 		}
 		jobs, err := w.fetchJobs(ctx, count)
 		if err != nil {
+			consecutiveErrors++
 			w.logWarn(ctx, "failed to fetch jobs",
 				slog.String("error", err.Error()),
+				slog.Int("consecutive_errors", consecutiveErrors),
 			)
-			// On error, wait and retry.
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(w.config.pollInterval):
+			case <-time.After(fetchBackoff(consecutiveErrors, w.config.pollInterval)):
 				continue
 			}
 		}
+
+		consecutiveErrors = 0
 
 		if len(jobs) == 0 {
 			// No jobs available, wait before polling again.
@@ -316,6 +320,24 @@ func (w *Worker) fetchLoop(ctx context.Context) {
 			}()
 		}
 	}
+}
+
+const maxFetchBackoff = 30 * time.Second
+
+// fetchBackoff returns an exponential backoff duration capped at maxFetchBackoff.
+func fetchBackoff(consecutiveErrors int, base time.Duration) time.Duration {
+	if consecutiveErrors <= 1 {
+		return base
+	}
+	shift := consecutiveErrors - 1
+	if shift > 10 {
+		shift = 10
+	}
+	backoff := base * time.Duration(1<<shift)
+	if backoff > maxFetchBackoff {
+		backoff = maxFetchBackoff
+	}
+	return backoff
 }
 
 // processJob executes a single job through the middleware chain and handler.
