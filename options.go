@@ -1,6 +1,7 @@
 package ojs
 
 import (
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -193,6 +194,7 @@ type workerConfig struct {
 	pollInterval      time.Duration
 	authToken         string
 	httpClient        *http.Client
+	logger            *slog.Logger
 }
 
 // WorkerOption configures the OJS worker.
@@ -256,6 +258,15 @@ func WithWorkerAuth(token string) WorkerOption {
 func WithWorkerHTTPClient(client *http.Client) WorkerOption {
 	return func(c *workerConfig) {
 		c.httpClient = client
+	}
+}
+
+// WithLogger sets a structured logger for the worker's operational events.
+// When set, the worker logs ACK/NACK failures, fetch errors, and state
+// transitions. Pass nil to disable logging (the default).
+func WithLogger(logger *slog.Logger) WorkerOption {
+	return func(c *workerConfig) {
+		c.logger = logger
 	}
 }
 

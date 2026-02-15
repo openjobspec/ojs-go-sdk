@@ -3,6 +3,7 @@ package ojs
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -276,6 +277,9 @@ func (w *Worker) fetchLoop(ctx context.Context) {
 		}
 		jobs, err := w.fetchJobs(ctx, count)
 		if err != nil {
+			w.logWarn(ctx, "failed to fetch jobs",
+				slog.String("error", err.Error()),
+			)
 			// On error, wait and retry.
 			select {
 			case <-ctx.Done():
@@ -322,8 +326,14 @@ func (w *Worker) processJob(ctx context.Context, job Job) {
 
 	if !ok {
 		// No handler registered for this job type. NACK it.
-		_ = w.nackJob(ctx, job.ID, "handler_error",
-			fmt.Sprintf("no handler registered for job type %q", job.Type))
+		if nackErr := w.nackJob(ctx, job.ID, "handler_error",
+			fmt.Sprintf("no handler registered for job type %q", job.Type)); nackErr != nil {
+			w.logError(ctx, "failed to nack unhandled job",
+				slog.String("job.id", job.ID),
+				slog.String("job.type", job.Type),
+				slog.String("error", nackErr.Error()),
+			)
+		}
 		return
 	}
 
@@ -345,12 +355,24 @@ func (w *Worker) processJob(ctx context.Context, job Job) {
 
 	if err != nil {
 		// Job failed. NACK it.
-		_ = w.nackJob(ctx, job.ID, "handler_error", err.Error())
+		if nackErr := w.nackJob(ctx, job.ID, "handler_error", err.Error()); nackErr != nil {
+			w.logError(ctx, "failed to nack job",
+				slog.String("job.id", job.ID),
+				slog.String("job.type", job.Type),
+				slog.String("error", nackErr.Error()),
+			)
+		}
 		return
 	}
 
 	// Job succeeded. ACK it.
-	_ = w.ackJob(ctx, job.ID, ref.data)
+	if ackErr := w.ackJob(ctx, job.ID, ref.data); ackErr != nil {
+		w.logError(ctx, "failed to ack job",
+			slog.String("job.id", job.ID),
+			slog.String("job.type", job.Type),
+			slog.String("error", ackErr.Error()),
+		)
+	}
 }
 
 // fetchJobs fetches jobs from the OJS server.
@@ -493,4 +515,18 @@ func (w *Worker) waitForActiveJobs() {
 func generateWorkerID() string {
 	hostname, _ := os.Hostname()
 	return fmt.Sprintf("worker_%s_%d_%d", hostname, os.Getpid(), time.Now().UnixNano())
+}
+
+// logError logs an error if the worker has a logger configured.
+func (w *Worker) logError(ctx context.Context, msg string, attrs ...slog.Attr) {
+	if w.config.logger != nil {
+		w.config.logger.LogAttrs(ctx, slog.LevelError, msg, attrs...)
+	}
+}
+
+// logWarn logs a warning if the worker has a logger configured.
+func (w *Worker) logWarn(ctx context.Context, msg string, attrs ...slog.Attr) {
+	if w.config.logger != nil {
+		w.config.logger.LogAttrs(ctx, slog.LevelWarn, msg, attrs...)
+	}
 }
