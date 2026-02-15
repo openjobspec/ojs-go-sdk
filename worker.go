@@ -325,9 +325,9 @@ func (w *Worker) processJob(ctx context.Context, job Job) {
 	w.handlersMu.RUnlock()
 
 	if !ok {
-		// No handler registered for this job type. NACK it.
+		// No handler registered for this job type. NACK it as non-retryable.
 		if nackErr := w.nackJob(ctx, job.ID, "handler_error",
-			fmt.Sprintf("no handler registered for job type %q", job.Type)); nackErr != nil {
+			fmt.Sprintf("no handler registered for job type %q", job.Type), false); nackErr != nil {
 			w.logError(ctx, "failed to nack unhandled job",
 				slog.String("job.id", job.ID),
 				slog.String("job.type", job.Type),
@@ -354,8 +354,8 @@ func (w *Worker) processJob(ctx context.Context, job Job) {
 	err := wrapped(jctx)
 
 	if err != nil {
-		// Job failed. NACK it.
-		if nackErr := w.nackJob(ctx, job.ID, "handler_error", err.Error()); nackErr != nil {
+		// Job failed. NACK it, respecting the error's retryability signal.
+		if nackErr := w.nackJob(ctx, job.ID, "handler_error", err.Error(), isHandlerRetryable(err)); nackErr != nil {
 			w.logError(ctx, "failed to nack job",
 				slog.String("job.id", job.ID),
 				slog.String("job.type", job.Type),
@@ -409,7 +409,7 @@ func (w *Worker) ackJob(ctx context.Context, jobID string, result map[string]any
 }
 
 // nackJob reports job failure to the OJS server.
-func (w *Worker) nackJob(ctx context.Context, jobID, code, message string) error {
+func (w *Worker) nackJob(ctx context.Context, jobID, code, message string, retryable bool) error {
 	req := struct {
 		JobID string `json:"job_id"`
 		Error struct {
@@ -422,7 +422,7 @@ func (w *Worker) nackJob(ctx context.Context, jobID, code, message string) error
 	}
 	req.Error.Code = code
 	req.Error.Message = message
-	req.Error.Retryable = true
+	req.Error.Retryable = retryable
 	return w.transport.post(ctx, basePath+"/workers/nack", req, nil)
 }
 

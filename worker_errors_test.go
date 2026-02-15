@@ -459,3 +459,64 @@ func TestNonRetryable(t *testing.T) {
 		t.Error("isHandlerRetryable should return true for regular errors")
 	}
 }
+
+func TestWorkerNackNonRetryableError(t *testing.T) {
+	var nackReceived atomic.Int32
+	var nackRetryable atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", ojsContentType)
+		switch r.URL.Path {
+		case "/ojs/v1/workers/fetch":
+			if nackReceived.Load() == 0 {
+				json.NewEncoder(w).Encode(map[string]any{
+					"jobs": []map[string]any{
+						{
+							"id": "nr-job", "type": "test.nonretryable", "state": "active",
+							"args": []any{map[string]any{}}, "queue": "default",
+							"attempt": 1, "max_attempts": 3,
+						},
+					},
+				})
+			} else {
+				json.NewEncoder(w).Encode(map[string]any{"jobs": []any{}})
+			}
+		case "/ojs/v1/workers/nack":
+			var req struct {
+				JobID string `json:"job_id"`
+				Error struct {
+					Retryable bool `json:"retryable"`
+				} `json:"error"`
+			}
+			json.NewDecoder(r.Body).Decode(&req)
+			if req.Error.Retryable {
+				nackRetryable.Add(1)
+			}
+			nackReceived.Add(1)
+			json.NewEncoder(w).Encode(map[string]any{"acknowledged": true})
+		case "/ojs/v1/workers/heartbeat":
+			json.NewEncoder(w).Encode(map[string]any{"state": "running"})
+		}
+	}))
+	defer server.Close()
+
+	worker := NewWorker(server.URL,
+		WithConcurrency(1),
+		WithPollInterval(50*time.Millisecond),
+		WithHeartbeatInterval(100*time.Millisecond),
+	)
+	worker.Register("test.nonretryable", func(ctx JobContext) error {
+		return NonRetryable(fmt.Errorf("invalid input: cannot process"))
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_ = worker.Start(ctx)
+
+	if nackReceived.Load() < 1 {
+		t.Fatal("expected nack to be sent")
+	}
+	if nackRetryable.Load() != 0 {
+		t.Error("expected nack with retryable=false for NonRetryable error")
+	}
+}
