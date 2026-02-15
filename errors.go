@@ -107,12 +107,55 @@ func (e *Error) Unwrap() error {
 }
 
 // IsRetryable returns true if the error indicates the operation can be retried.
+// OJS API errors use their Retryable field. Errors wrapped with [NonRetryable]
+// are never retryable. All other errors return false.
 func IsRetryable(err error) bool {
+	var nr *nonRetryableError
+	if errors.As(err, &nr) {
+		return false
+	}
 	var ojsErr *Error
 	if errors.As(err, &ojsErr) {
 		return ojsErr.Retryable
 	}
 	return false
+}
+
+// isHandlerRetryable determines retryability for handler errors in the worker.
+// Handler errors default to retryable unless explicitly wrapped with NonRetryable.
+func isHandlerRetryable(err error) bool {
+	var nr *nonRetryableError
+	if errors.As(err, &nr) {
+		return false
+	}
+	return true
+}
+
+// nonRetryableError wraps an error to mark it as non-retryable.
+type nonRetryableError struct {
+	err error
+}
+
+func (e *nonRetryableError) Error() string { return e.err.Error() }
+func (e *nonRetryableError) Unwrap() error { return e.err }
+
+// NonRetryable wraps an error to indicate that the job should not be retried.
+// The worker will NACK the job with retryable=false, causing it to be
+// discarded rather than re-queued.
+//
+// Example:
+//
+//	worker.Register("email.send", func(ctx ojs.JobContext) error {
+//	    if !isValidEmail(ctx.Job.Args["to"]) {
+//	        return ojs.NonRetryable(fmt.Errorf("invalid email address"))
+//	    }
+//	    return sendEmail(ctx)
+//	})
+func NonRetryable(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &nonRetryableError{err: err}
 }
 
 // ErrorCode extracts the OJS error code from an error, if available.

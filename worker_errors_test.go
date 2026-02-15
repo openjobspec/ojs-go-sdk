@@ -428,4 +428,34 @@ func TestIsRetryable(t *testing.T) {
 	if !IsRetryable(&Error{Code: "rate_limited", Retryable: true}) {
 		t.Error("rate_limited should be retryable")
 	}
+	if IsRetryable(NonRetryable(fmt.Errorf("fatal error"))) {
+		t.Error("NonRetryable-wrapped error should not be retryable")
+	}
+}
+
+func TestNonRetryable(t *testing.T) {
+	// NonRetryable(nil) returns nil.
+	if NonRetryable(nil) != nil {
+		t.Error("NonRetryable(nil) should return nil")
+	}
+
+	// Wrapped error preserves the original message.
+	orig := fmt.Errorf("bad input")
+	wrapped := NonRetryable(orig)
+	if wrapped.Error() != "bad input" {
+		t.Errorf("expected message 'bad input', got %q", wrapped.Error())
+	}
+
+	// errors.Is still works through NonRetryable.
+	if !errors.Is(NonRetryable(ErrNotFound), ErrNotFound) {
+		t.Error("errors.Is should work through NonRetryable wrapper")
+	}
+
+	// isHandlerRetryable respects NonRetryable.
+	if isHandlerRetryable(wrapped) {
+		t.Error("isHandlerRetryable should return false for NonRetryable errors")
+	}
+	if !isHandlerRetryable(fmt.Errorf("regular error")) {
+		t.Error("isHandlerRetryable should return true for regular errors")
+	}
 }
