@@ -147,6 +147,25 @@ func main() {
 }
 ```
 
+### Typed Handlers (Generics)
+
+Use `RegisterTyped` to get auto-parsed, type-safe arguments — no more manual type assertions:
+
+```go
+type EmailArgs struct {
+    To      string `json:"to"`
+    Subject string `json:"subject"`
+}
+
+ojs.RegisterTyped(worker, "email.send", func(ctx ojs.JobContext, args EmailArgs) error {
+    log.Printf("Sending to %s: %s", args.To, args.Subject)
+    return nil
+})
+```
+
+If the args can't be parsed into the struct, the job is automatically NACKed
+as non-retryable.
+
 ### Pre-built Middleware
 
 The `middleware` package provides ready-to-use middleware for common cross-cutting concerns:
@@ -172,6 +191,29 @@ type MetricsRecorder interface {
     JobCompleted(jobType, queue string, duration time.Duration)
     JobFailed(jobType, queue string, duration time.Duration)
 }
+```
+
+### OpenTelemetry
+
+The `middleware/otel` package provides native OpenTelemetry tracing and metrics
+(separate Go module to keep the core dependency-free):
+
+```bash
+go get github.com/openjobspec/ojs-go-sdk/middleware/otel
+```
+
+```go
+import ojsotel "github.com/openjobspec/ojs-go-sdk/middleware/otel"
+
+// Distributed tracing — one span per job with type, ID, queue, attempt.
+worker.UseNamed("tracing", ojsotel.Tracing(
+    ojsotel.WithTracerProvider(tp),
+))
+
+// Metrics — counters (started/completed/failed) and duration histogram.
+worker.UseNamed("metrics", ojsotel.Metrics(
+    ojsotel.WithMeterProvider(mp),
+))
 ```
 
 ### Batch Enqueue
@@ -239,6 +281,21 @@ if errors.As(err, &ojsErr) {
 if ojs.IsRetryable(err) {
     // Retry the operation.
 }
+```
+
+### Non-Retryable Handler Errors
+
+By default, handler errors are retryable. Wrap an error with `NonRetryable` to tell
+the server the job should be discarded instead of re-queued:
+
+```go
+worker.Register("email.send", func(ctx ojs.JobContext) error {
+    to, _ := ctx.Job.Args["to"].(string)
+    if !isValidEmail(to) {
+        return ojs.NonRetryable(fmt.Errorf("invalid email: %s", to))
+    }
+    return sendEmail(to)
+})
 ```
 
 ## Configuration

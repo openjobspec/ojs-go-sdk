@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `NonRetryable(err)` error wrapper — handlers can signal non-retryable failures
+- `isHandlerRetryable` internal helper for worker NACK retryability decisions
+- Exponential backoff on consecutive fetch errors in worker (capped at 30s)
+- Dependabot configuration for GitHub Actions version updates
+- `RegisterTyped[T]` generic handler — auto-unmarshals job args into typed structs
+- `middleware/otel` subpackage — OpenTelemetry tracing and metrics middleware (separate Go module)
+- `ojstesting.FakeClient(t)` — returns a real `*ojs.Client` backed by the in-memory fake store
+- Fuzz tests for Job JSON unmarshaling, args wire conversion, and validation
+- Tests for `NonRetryable`, `isHandlerRetryable`, worker NACK retryability, fetch backoff, URL encoding, typed handlers, FakeClient
 - Project scaffolding: Makefile, .gitignore, doc.go, CONTRIBUTING.md, CHANGELOG.md
 - GitHub Actions CI workflow with Go 1.22/1.23/1.24 matrix
 - README badges (Go Reference, Go version, license)
@@ -35,6 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ListQueues` now returns pagination metadata `(*Pagination)` alongside queues
 
 ### Fixed
+- Worker NACK now respects error retryability (`NonRetryable` → `retryable=false` in NACK)
+- Missing handler NACK now sends `retryable=false` (no point retrying without a handler)
+- URL-encode path parameters in all client methods (job IDs, queue names, cron names, workflow IDs)
+- URL-encode queue query parameter in `ListDeadLetterJobs`
+- Eliminate duplicate `argsToWire` call in `Enqueue` and `EnqueueBatch`
 - Worker ACK/NACK/fetch errors are now logged instead of silently discarded
 - Transport only sets `Content-Type` header on requests with a body (POST)
 - Transport limits response body reads to 10 MB to prevent unbounded memory usage
