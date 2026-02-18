@@ -1,4 +1,4 @@
-.PHONY: test lint cover vet bench clean
+.PHONY: test lint cover vet bench clean docs
 
 # Run all tests with race detection.
 test:
@@ -23,6 +23,11 @@ lint: vet
 # Run benchmarks.
 bench:
 	go test ./... -bench=. -benchmem -run='^$$' -count=1
+
+# Generate documentation using pkgsite.
+docs:
+	@echo "Go docs are generated via godoc or pkgsite."
+	@echo "Run: go install golang.org/x/pkgsite/cmd/pkgsite@latest && pkgsite -open ."
 
 # Remove build artifacts.
 clean:
