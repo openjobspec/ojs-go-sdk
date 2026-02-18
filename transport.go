@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -92,7 +94,7 @@ func (t *transport) do(ctx context.Context, method, path string, body any, resul
 	}
 
 	if resp.StatusCode >= 400 {
-		return parseErrorResponse(respBody, resp.StatusCode)
+		return parseErrorResponse(respBody, resp.StatusCode, resp.Header)
 	}
 
 	if result != nil && len(respBody) > 0 {
@@ -120,7 +122,7 @@ func (t *transport) delete(ctx context.Context, path string, result any) error {
 }
 
 // parseErrorResponse parses an OJS error response body into an *Error.
-func parseErrorResponse(body []byte, statusCode int) error {
+func parseErrorResponse(body []byte, statusCode int, header http.Header) error {
 	var errResp struct {
 		Error struct {
 			Code      string         `json:"code"`
@@ -139,6 +141,9 @@ func parseErrorResponse(body []byte, statusCode int) error {
 		}
 	}
 
+	retryAfter := parseRetryAfter(header)
+	rateLimit := parseRateLimitHeaders(header, retryAfter)
+
 	return &Error{
 		Code:       errResp.Error.Code,
 		Message:    errResp.Error.Message,
@@ -146,5 +151,45 @@ func parseErrorResponse(body []byte, statusCode int) error {
 		Details:    errResp.Error.Details,
 		RequestID:  errResp.Error.RequestID,
 		HTTPStatus: statusCode,
+		RetryAfter: retryAfter,
+		RateLimit:  rateLimit,
 	}
+}
+
+// parseRetryAfter extracts the Retry-After header value as a time.Duration.
+// Returns zero if the header is absent or cannot be parsed as seconds.
+func parseRetryAfter(header http.Header) time.Duration {
+	raw := header.Get("Retry-After")
+	if raw == "" {
+		return 0
+	}
+	seconds, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0
+	}
+	return time.Duration(seconds * float64(time.Second))
+}
+
+// parseRateLimitHeaders extracts rate limit metadata from response headers.
+// Returns nil if none of the rate limit headers are present.
+func parseRateLimitHeaders(header http.Header, retryAfter time.Duration) *RateLimitInfo {
+	limitStr := header.Get("X-RateLimit-Limit")
+	remainingStr := header.Get("X-RateLimit-Remaining")
+	resetStr := header.Get("X-RateLimit-Reset")
+
+	if limitStr == "" && remainingStr == "" && resetStr == "" && retryAfter == 0 {
+		return nil
+	}
+
+	info := &RateLimitInfo{RetryAfter: retryAfter}
+	if v, err := strconv.ParseInt(limitStr, 10, 64); err == nil {
+		info.Limit = v
+	}
+	if v, err := strconv.ParseInt(remainingStr, 10, 64); err == nil {
+		info.Remaining = v
+	}
+	if v, err := strconv.ParseInt(resetStr, 10, 64); err == nil {
+		info.Reset = v
+	}
+	return info
 }

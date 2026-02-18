@@ -3,6 +3,7 @@ package ojs
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 // Standard OJS error codes as defined in the OJS HTTP binding specification.
@@ -32,6 +33,21 @@ var (
 	ErrTimeout     = errors.New("ojs: timeout")
 )
 
+// RateLimitInfo contains rate limit metadata extracted from response headers.
+type RateLimitInfo struct {
+	// Limit is the maximum number of requests allowed per window.
+	Limit int64
+
+	// Remaining is the number of requests remaining in the current window.
+	Remaining int64
+
+	// Reset is the Unix timestamp (seconds) when the current window resets.
+	Reset int64
+
+	// RetryAfter is the duration to wait before retrying, from the Retry-After header.
+	RetryAfter time.Duration
+}
+
 // Error represents a structured OJS API error.
 // It supports errors.Is and errors.As for idiomatic Go error handling.
 type Error struct {
@@ -52,6 +68,13 @@ type Error struct {
 
 	// HTTPStatus is the HTTP status code from the response.
 	HTTPStatus int `json:"-"`
+
+	// RetryAfter is the duration to wait before retrying, extracted from the
+	// Retry-After response header. Zero means the header was absent or invalid.
+	RetryAfter time.Duration `json:"-"`
+
+	// RateLimit contains rate limit metadata from response headers, if present.
+	RateLimit *RateLimitInfo `json:"-"`
 }
 
 // Error implements the error interface.

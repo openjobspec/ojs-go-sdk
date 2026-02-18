@@ -321,6 +321,101 @@ func TestErrorIsRateLimited(t *testing.T) {
 	}
 }
 
+func TestErrorRetryAfterHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", ojsContentType)
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"code":      "rate_limited",
+				"message":   "Rate limit exceeded.",
+				"retryable": true,
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, _ := NewClient(server.URL)
+	_, err := client.Enqueue(context.Background(), "test", Args{})
+
+	var ojsErr *Error
+	if !errors.As(err, &ojsErr) {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if ojsErr.RetryAfter != 60*time.Second {
+		t.Errorf("expected RetryAfter=60s, got %v", ojsErr.RetryAfter)
+	}
+}
+
+func TestErrorRetryAfterHeaderAbsent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", ojsContentType)
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"code":      "rate_limited",
+				"message":   "Rate limit exceeded.",
+				"retryable": true,
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, _ := NewClient(server.URL)
+	_, err := client.Enqueue(context.Background(), "test", Args{})
+
+	var ojsErr *Error
+	if !errors.As(err, &ojsErr) {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if ojsErr.RetryAfter != 0 {
+		t.Errorf("expected RetryAfter=0, got %v", ojsErr.RetryAfter)
+	}
+}
+
+func TestErrorRateLimitInfoHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", ojsContentType)
+		w.Header().Set("Retry-After", "30")
+		w.Header().Set("X-RateLimit-Limit", "100")
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", "1700000000")
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"code":      "rate_limited",
+				"message":   "Rate limit exceeded.",
+				"retryable": true,
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, _ := NewClient(server.URL)
+	_, err := client.Enqueue(context.Background(), "test", Args{})
+
+	var ojsErr *Error
+	if !errors.As(err, &ojsErr) {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if ojsErr.RateLimit == nil {
+		t.Fatal("expected RateLimit to be set")
+	}
+	if ojsErr.RateLimit.Limit != 100 {
+		t.Errorf("expected Limit=100, got %d", ojsErr.RateLimit.Limit)
+	}
+	if ojsErr.RateLimit.Remaining != 0 {
+		t.Errorf("expected Remaining=0, got %d", ojsErr.RateLimit.Remaining)
+	}
+	if ojsErr.RateLimit.Reset != 1700000000 {
+		t.Errorf("expected Reset=1700000000, got %d", ojsErr.RateLimit.Reset)
+	}
+	if ojsErr.RateLimit.RetryAfter != 30*time.Second {
+		t.Errorf("expected RetryAfter=30s, got %v", ojsErr.RateLimit.RetryAfter)
+	}
+}
+
 func TestHealth(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/ojs/v1/health" {
