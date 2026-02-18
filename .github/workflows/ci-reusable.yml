@@ -1,0 +1,21 @@
+name: CI (Reusable)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ['1.22', '1.24']
+    uses: openjobspec/.github/.github/workflows/ci-go.yml@main
+    with:
+      go-version: ${{ matrix.go-version }}
+      working-directory: .
