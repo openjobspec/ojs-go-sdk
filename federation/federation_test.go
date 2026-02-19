@@ -351,6 +351,270 @@ func TestWithStrategy_SetsStrategy(t *testing.T) {
 	}
 }
 
+// --- RoundRobin Router Tests ---
+
+func TestRoundRobinRouter_CyclesThroughRegions(t *testing.T) {
+	regions := makeTestRegions("a", "b", "c")
+	r := &RoundRobinRouter{}
+
+	seen := make([]string, 6)
+	for i := 0; i < 6; i++ {
+		got, err := r.Select(context.Background(), regions, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		seen[i] = got
+	}
+
+	// With sorted IDs [a, b, c], the cycle should repeat.
+	if seen[0] != seen[3] || seen[1] != seen[4] || seen[2] != seen[5] {
+		t.Errorf("expected repeating cycle, got %v", seen)
+	}
+}
+
+func TestRoundRobinRouter_NoRegionsError(t *testing.T) {
+	r := &RoundRobinRouter{}
+	_, err := r.Select(context.Background(), map[string]*regionState{}, "")
+	if err != ErrNoHealthyRegions {
+		t.Errorf("got %v, want ErrNoHealthyRegions", err)
+	}
+}
+
+func TestRoundRobinRouter_AllRegionsSelected(t *testing.T) {
+	regions := makeTestRegions("us-east-1", "eu-west-1", "ap-south-1")
+	r := &RoundRobinRouter{}
+	selected := make(map[string]bool)
+	for i := 0; i < 3; i++ {
+		got, err := r.Select(context.Background(), regions, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		selected[got] = true
+	}
+	if len(selected) != 3 {
+		t.Errorf("expected all 3 regions selected, got %d", len(selected))
+	}
+}
+
+// --- LatencyBased Router Tests ---
+
+func TestLatencyBasedRouter_SelectsLowestLatency(t *testing.T) {
+	regions := makeTestRegions("us-east-1", "eu-west-1", "ap-south-1")
+	regions["us-east-1"].latency.Store(200_000_000)
+	regions["eu-west-1"].latency.Store(50_000_000)
+	regions["ap-south-1"].latency.Store(150_000_000)
+
+	r := &LatencyBasedRouter{}
+	got, err := r.Select(context.Background(), regions, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "eu-west-1" {
+		t.Errorf("got %q, want %q (lowest latency)", got, "eu-west-1")
+	}
+}
+
+func TestLatencyBasedRouter_NoRegionsError(t *testing.T) {
+	r := &LatencyBasedRouter{}
+	_, err := r.Select(context.Background(), map[string]*regionState{}, "")
+	if err != ErrNoHealthyRegions {
+		t.Errorf("got %v, want ErrNoHealthyRegions", err)
+	}
+}
+
+// --- ActivePassive Router Tests ---
+
+func TestActivePassiveRouter_PrefersPrimary(t *testing.T) {
+	regions := makeTestRegions("primary", "secondary-1", "secondary-2")
+
+	r := &ActivePassiveRouter{
+		Primary:     "primary",
+		Secondaries: []string{"secondary-1", "secondary-2"},
+	}
+	got, err := r.Select(context.Background(), regions, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "primary" {
+		t.Errorf("got %q, want %q", got, "primary")
+	}
+}
+
+func TestActivePassiveRouter_FallsBackToSecondary(t *testing.T) {
+	regions := makeTestRegions("secondary-1", "secondary-2")
+
+	r := &ActivePassiveRouter{
+		Primary:     "primary",
+		Secondaries: []string{"secondary-1", "secondary-2"},
+	}
+	got, err := r.Select(context.Background(), regions, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "secondary-1" {
+		t.Errorf("got %q, want %q (first secondary)", got, "secondary-1")
+	}
+}
+
+func TestActivePassiveRouter_FallsBackToAnyHealthy(t *testing.T) {
+	regions := makeTestRegions("other-region")
+
+	r := &ActivePassiveRouter{
+		Primary:     "primary",
+		Secondaries: []string{"secondary-1"},
+	}
+	got, err := r.Select(context.Background(), regions, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "other-region" {
+		t.Errorf("got %q, want %q", got, "other-region")
+	}
+}
+
+func TestActivePassiveRouter_NoRegionsError(t *testing.T) {
+	r := &ActivePassiveRouter{Primary: "primary"}
+	_, err := r.Select(context.Background(), map[string]*regionState{}, "")
+	if err != ErrNoHealthyRegions {
+		t.Errorf("got %v, want ErrNoHealthyRegions", err)
+	}
+}
+
+// --- Geographic Router Tests ---
+
+func TestGeographicRouter_RoutesBasedOnHint(t *testing.T) {
+	regions := makeTestRegions("us-east-1", "eu-west-1")
+
+	r := &GeographicRouter{
+		RegionMapping: map[string]string{
+			"eu": "eu-west-1",
+			"us": "us-east-1",
+		},
+		DefaultRegion: "us-east-1",
+	}
+
+	ctx := WithGeoHint(context.Background(), "eu")
+	got, err := r.Select(ctx, regions, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "eu-west-1" {
+		t.Errorf("got %q, want %q", got, "eu-west-1")
+	}
+}
+
+func TestGeographicRouter_FallsBackToDefault(t *testing.T) {
+	regions := makeTestRegions("us-east-1", "eu-west-1")
+
+	r := &GeographicRouter{
+		RegionMapping: map[string]string{"eu": "eu-west-1"},
+		DefaultRegion: "us-east-1",
+	}
+
+	// No hint in context.
+	got, err := r.Select(context.Background(), regions, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "us-east-1" {
+		t.Errorf("got %q, want %q (default)", got, "us-east-1")
+	}
+}
+
+func TestGeographicRouter_FallsBackToAnyWhenDefaultUnhealthy(t *testing.T) {
+	regions := makeTestRegions("eu-west-1")
+
+	r := &GeographicRouter{
+		RegionMapping: map[string]string{},
+		DefaultRegion: "us-east-1",
+	}
+	got, err := r.Select(context.Background(), regions, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "eu-west-1" {
+		t.Errorf("got %q, want %q (fallback)", got, "eu-west-1")
+	}
+}
+
+func TestGeographicRouter_HintRegionUnhealthyFallsBack(t *testing.T) {
+	regions := makeTestRegions("us-east-1")
+
+	r := &GeographicRouter{
+		RegionMapping: map[string]string{"eu": "eu-west-1"},
+		DefaultRegion: "us-east-1",
+	}
+
+	ctx := WithGeoHint(context.Background(), "eu")
+	got, err := r.Select(ctx, regions, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "us-east-1" {
+		t.Errorf("got %q, want %q (fallback to default)", got, "us-east-1")
+	}
+}
+
+func TestGeographicRouter_NoRegionsError(t *testing.T) {
+	r := &GeographicRouter{}
+	_, err := r.Select(context.Background(), map[string]*regionState{}, "")
+	if err != ErrNoHealthyRegions {
+		t.Errorf("got %v, want ErrNoHealthyRegions", err)
+	}
+}
+
+// --- NewFromConfig Tests ---
+
+func TestNewFromConfig_CreatesClient(t *testing.T) {
+	fc, err := NewFromConfig(FederationConfig{
+		Regions: []RegionConfig{
+			{ID: "us-east-1", URL: "http://localhost:1"},
+			{ID: "eu-west-1", URL: "http://localhost:2"},
+		},
+		LocalRegion:      "us-east-1",
+		RoutingPolicy:    RoutingPolicy{Strategy: StrategyRoundRobin},
+		HealthInterval:   5 * time.Second,
+		FailureThreshold: 3,
+		CooldownPeriod:   15 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fc.Regions()) != 2 {
+		t.Errorf("expected 2 regions, got %d", len(fc.Regions()))
+	}
+	if strategyName(fc.strategy) != StrategyRoundRobin {
+		t.Errorf("expected round-robin strategy, got %q", strategyName(fc.strategy))
+	}
+}
+
+func TestNewFromConfig_NoRegionsError(t *testing.T) {
+	_, err := NewFromConfig(FederationConfig{})
+	if err != ErrNoRegions {
+		t.Errorf("got %v, want ErrNoRegions", err)
+	}
+}
+
+// --- Strategy Name Tests for New Strategies ---
+
+func TestStrategyName_NewStrategies(t *testing.T) {
+	tests := []struct {
+		strategy RoutingStrategy
+		want     string
+	}{
+		{&RoundRobinRouter{}, StrategyRoundRobin},
+		{&LatencyBasedRouter{}, StrategyLatencyBased},
+		{&ActivePassiveRouter{}, StrategyActivePassive},
+		{&GeographicRouter{}, StrategyGeographic},
+	}
+	for _, tt := range tests {
+		got := strategyName(tt.strategy)
+		if got != tt.want {
+			t.Errorf("strategyName(%T) = %q, want %q", tt.strategy, got, tt.want)
+		}
+	}
+}
+
 func TestFederationID_IsUnique(t *testing.T) {
 	seen := make(map[string]bool)
 	for i := 0; i < 1000; i++ {

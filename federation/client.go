@@ -1,103 +1,13 @@
-// Package federation provides multi-region federation for OJS clients.
-//
-// A FederatedClient wraps multiple standard OJS clients -- one per region --
-// and routes jobs based on configurable strategies: affinity (prefer local),
-// overflow (least-loaded), or geo-pin (require specific region).
-//
-// Federation is composable: it requires no backend changes. Any conforming
-// OJS server can participate in a federated topology.
-//
-// Example:
-//
-//	fc, err := federation.New(
-//	    federation.WithRegion(federation.RegionConfig{ID: "us-east-1", URL: "http://us-east.example.com"}),
-//	    federation.WithRegion(federation.RegionConfig{ID: "eu-west-1", URL: "http://eu-west.example.com"}),
-//	    federation.WithLocalRegion("us-east-1"),
-//	    federation.WithStrategy(federation.StrategyAffinity),
-//	)
 package federation
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"math/rand"
-	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	ojs "github.com/openjobspec/ojs-go-sdk"
 )
-
-// Routing strategy constants.
-const (
-	StrategyAffinity = "affinity"
-	StrategyOverflow = "overflow"
-	StrategyGeoPin   = "geo-pin"
-)
-
-// Circuit breaker states.
-const (
-	circuitClosed   = 0
-	circuitOpen     = 1
-	circuitHalfOpen = 2
-)
-
-// Default configuration values.
-const (
-	DefaultHealthInterval    = 10 * time.Second
-	DefaultFailureThreshold  = 5
-	DefaultCooldownPeriod    = 30 * time.Second
-	DefaultWeight            = 1
-)
-
-// Federation metadata key prefix.
-const metaPrefix = "ojs.federation."
-
-// Sentinel errors.
-var (
-	ErrNoRegions          = errors.New("federation: no regions configured")
-	ErrNoHealthyRegions   = errors.New("federation: no healthy regions available")
-	ErrRegionNotFound     = errors.New("federation: region not found in registry")
-	ErrRegionUnavailable  = errors.New("federation: target region is unavailable")
-	ErrLocalRegionUnset   = errors.New("federation: local region not configured")
-)
-
-// RegionConfig describes a single OJS region in the federation.
-type RegionConfig struct {
-	// ID is the unique identifier for this region (e.g., "us-east-1").
-	ID string
-
-	// URL is the base URL of the OJS server in this region.
-	URL string
-
-	// Weight is the routing weight for weighted load balancing. Default: 1.
-	Weight int
-
-	// Tags are arbitrary labels for filtering (e.g., "gpu", "high-memory").
-	Tags []string
-}
-
-// regionState tracks the runtime state of a region.
-type regionState struct {
-	config  RegionConfig
-	client  *ojs.Client
-	healthy atomic.Bool
-	latency atomic.Int64 // nanoseconds, from last health check
-
-	// Circuit breaker state.
-	cbState      atomic.Int32 // circuitClosed, circuitOpen, circuitHalfOpen
-	failures     atomic.Int32
-	lastFailure  atomic.Int64 // unix nano
-}
-
-// RoutingStrategy selects a target region for a job.
-type RoutingStrategy interface {
-	// Select returns the region ID where the job should be enqueued.
-	// The regions map contains only healthy regions.
-	Select(ctx context.Context, regions map[string]*regionState, localRegion string) (string, error)
-}
 
 // FederatedClient wraps multiple region clients with routing and failover.
 type FederatedClient struct {
@@ -160,7 +70,7 @@ func WithLocalRegion(id string) Option {
 	}
 }
 
-// WithStrategy sets the default routing strategy.
+// WithStrategy sets the default routing strategy by name.
 func WithStrategy(name string) Option {
 	return func(fc *FederatedClient) {
 		switch name {
@@ -170,6 +80,14 @@ func WithStrategy(name string) Option {
 			fc.strategy = &OverflowRouter{}
 		case StrategyGeoPin:
 			fc.strategy = &GeoPinRouter{}
+		case StrategyRoundRobin:
+			fc.strategy = &RoundRobinRouter{}
+		case StrategyLatencyBased:
+			fc.strategy = &LatencyBasedRouter{}
+		case StrategyActivePassive:
+			fc.strategy = &ActivePassiveRouter{}
+		case StrategyGeographic:
+			fc.strategy = &GeographicRouter{}
 		}
 	}
 }
@@ -220,6 +138,30 @@ func New(opts ...Option) (*FederatedClient, error) {
 		return nil, ErrNoRegions
 	}
 	return fc, nil
+}
+
+// NewFromConfig creates a FederatedClient from a declarative FederationConfig.
+func NewFromConfig(cfg FederationConfig) (*FederatedClient, error) {
+	var opts []Option
+	for _, r := range cfg.Regions {
+		opts = append(opts, WithRegion(r))
+	}
+	if cfg.LocalRegion != "" {
+		opts = append(opts, WithLocalRegion(cfg.LocalRegion))
+	}
+	if cfg.RoutingPolicy.Strategy != "" {
+		opts = append(opts, WithStrategy(cfg.RoutingPolicy.Strategy))
+	}
+	if cfg.HealthInterval > 0 {
+		opts = append(opts, WithHealthInterval(cfg.HealthInterval))
+	}
+	if cfg.FailureThreshold > 0 {
+		opts = append(opts, WithFailureThreshold(cfg.FailureThreshold))
+	}
+	if cfg.CooldownPeriod > 0 {
+		opts = append(opts, WithCooldownPeriod(cfg.CooldownPeriod))
+	}
+	return New(opts...)
 }
 
 // StartHealthChecks begins periodic health monitoring of all regions.
@@ -465,131 +407,4 @@ func (fc *FederatedClient) GetJob(ctx context.Context, id string) (*ojs.Job, str
 		return job, regionID, nil
 	}
 	return nil, "", fmt.Errorf("federation: job %s not found in any region", id)
-}
-
-// --- Routing Strategy Implementations ---
-
-// AffinityRouter prefers the local region, falling back to the lowest-latency
-// healthy region.
-type AffinityRouter struct{}
-
-func (r *AffinityRouter) Select(_ context.Context, regions map[string]*regionState, localRegion string) (string, error) {
-	if len(regions) == 0 {
-		return "", ErrNoHealthyRegions
-	}
-	// Prefer local region.
-	if localRegion != "" {
-		if _, ok := regions[localRegion]; ok {
-			return localRegion, nil
-		}
-	}
-	// Fall back to lowest latency.
-	return lowestLatencyRegion(regions)
-}
-
-// OverflowRouter selects the region with the highest available capacity,
-// approximated by routing weight and inverse latency.
-type OverflowRouter struct{}
-
-func (r *OverflowRouter) Select(_ context.Context, regions map[string]*regionState, _ string) (string, error) {
-	if len(regions) == 0 {
-		return "", ErrNoHealthyRegions
-	}
-
-	// Weighted random selection: higher weight = more likely to be chosen.
-	totalWeight := 0
-	for _, rs := range regions {
-		totalWeight += rs.config.Weight
-	}
-	if totalWeight == 0 {
-		return "", ErrNoHealthyRegions
-	}
-
-	pick := rand.Intn(totalWeight)
-	for id, rs := range regions {
-		pick -= rs.config.Weight
-		if pick < 0 {
-			return id, nil
-		}
-	}
-
-	// Unreachable, but return first region as fallback.
-	for id := range regions {
-		return id, nil
-	}
-	return "", ErrNoHealthyRegions
-}
-
-// GeoPinRouter requires a specific region. It reads the target from
-// the local region field. If no region is specified, it returns an error.
-type GeoPinRouter struct {
-	// Region is the required target region ID.
-	Region string
-}
-
-func (r *GeoPinRouter) Select(_ context.Context, regions map[string]*regionState, _ string) (string, error) {
-	if r.Region == "" {
-		return "", fmt.Errorf("federation: geo-pin routing requires a target region")
-	}
-	if _, ok := regions[r.Region]; !ok {
-		return "", fmt.Errorf("%w: %s", ErrRegionUnavailable, r.Region)
-	}
-	return r.Region, nil
-}
-
-// --- Helpers ---
-
-func lowestLatencyRegion(regions map[string]*regionState) (string, error) {
-	var bestID string
-	var bestLatency int64 = 1<<63 - 1
-	for id, rs := range regions {
-		lat := rs.latency.Load()
-		if lat < bestLatency {
-			bestLatency = lat
-			bestID = id
-		}
-	}
-	if bestID == "" {
-		return "", ErrNoHealthyRegions
-	}
-	return bestID, nil
-}
-
-func strategyName(s RoutingStrategy) string {
-	switch s.(type) {
-	case *AffinityRouter:
-		return StrategyAffinity
-	case *OverflowRouter:
-		return StrategyOverflow
-	case *GeoPinRouter:
-		return StrategyGeoPin
-	default:
-		return "custom"
-	}
-}
-
-// generateFederationID produces a time-ordered unique ID.
-// In production, this should be UUIDv7. Here we use a timestamp-based
-// approach for zero external dependencies.
-func generateFederationID() string {
-	now := time.Now()
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
-		uint32(now.Unix()),
-		uint16(now.Nanosecond()>>16),
-		0x7000|uint16(now.Nanosecond()&0x0FFF),
-		0x8000|uint16(rand.Intn(0x3FFF)),
-		rand.Int63()&0xFFFFFFFFFFFF,
-	)
-}
-
-// NewHTTPClient is a convenience function that creates an *http.Client
-// suitable for cross-region communication with reasonable timeouts.
-func NewHTTPClient() *http.Client {
-	return &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			MaxIdleConnsPerHost: 10,
-			IdleConnTimeout:     90 * time.Second,
-		},
-	}
 }
