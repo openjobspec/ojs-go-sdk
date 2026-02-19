@@ -424,7 +424,7 @@ func TestHealth(t *testing.T) {
 		w.Header().Set("Content-Type", ojsContentType)
 		json.NewEncoder(w).Encode(map[string]any{
 			"status":         "ok",
-			"version":        "1.0.0-rc.1",
+			"version":        "1.0",
 			"uptime_seconds": 86400,
 			"backend": map[string]any{
 				"type":       "redis",

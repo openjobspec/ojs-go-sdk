@@ -150,9 +150,11 @@ func (u UniquePolicy) toWire() *uniquePolicyWire {
 
 // clientConfig holds the resolved configuration for a Client.
 type clientConfig struct {
-	httpClient *http.Client
-	authToken  string
-	headers    map[string]string
+	httpClient  *http.Client
+	authToken   string
+	headers     map[string]string
+	retryConfig *RetryConfig
+	logger      *slog.Logger
 }
 
 // ClientOption configures the OJS client.
@@ -169,6 +171,21 @@ func WithHTTPClient(client *http.Client) ClientOption {
 func WithAuthToken(token string) ClientOption {
 	return func(c *clientConfig) {
 		c.authToken = token
+	}
+}
+
+// WithRetryConfig sets the retry configuration for automatic 429 rate-limit retries.
+// By default, retries are enabled with DefaultRetryConfig().
+func WithRetryConfig(cfg RetryConfig) ClientOption {
+	return func(c *clientConfig) {
+		c.retryConfig = &cfg
+	}
+}
+
+// WithClientLogger sets a structured logger for the client's HTTP retry events.
+func WithClientLogger(logger *slog.Logger) ClientOption {
+	return func(c *clientConfig) {
+		c.logger = logger
 	}
 }
 
@@ -195,6 +212,7 @@ type workerConfig struct {
 	authToken         string
 	httpClient        *http.Client
 	logger            *slog.Logger
+	capabilities      *WorkerCapabilities
 }
 
 // WorkerOption configures the OJS worker.

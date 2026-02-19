@@ -241,7 +241,7 @@ func TestManifest(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", ojsContentType)
 		json.NewEncoder(w).Encode(map[string]any{
-			"ojs_version": "1.0.0-rc.1",
+			"ojs_version": "1.0",
 			"implementation": map[string]any{
 				"name": "ojs-backend-redis", "version": "0.1.0",
 				"language": "go", "homepage": "https://openjobspec.org",
@@ -265,8 +265,8 @@ func TestManifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Manifest() error = %v", err)
 	}
-	if manifest.OJSVersion != "1.0.0-rc.1" {
-		t.Errorf("expected ojs_version=1.0.0-rc.1, got %s", manifest.OJSVersion)
+	if manifest.OJSVersion != "1.0" {
+		t.Errorf("expected ojs_version=1.0, got %s", manifest.OJSVersion)
 	}
 	if manifest.Implementation.Name != "ojs-backend-redis" {
 		t.Errorf("expected implementation name=ojs-backend-redis, got %s", manifest.Implementation.Name)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,17 +15,19 @@ import (
 
 const (
 	ojsContentType     = "application/openjobspec+json"
-	ojsVersion         = "1.0.0-rc.1"
+	ojsVersion         = "1.0"
 	basePath           = "/ojs/v1"
 	maxResponseBodyLen = 10 << 20 // 10 MB
 )
 
 // transport is a thin HTTP wrapper for OJS API communication.
 type transport struct {
-	baseURL    string
-	httpClient *http.Client
-	authToken  string
-	headers    map[string]string
+	baseURL     string
+	httpClient  *http.Client
+	authToken   string
+	headers     map[string]string
+	retryConfig RetryConfig
+	logger      *slog.Logger
 }
 
 func newTransport(baseURL string, cfg clientConfig) *transport {
@@ -32,11 +35,17 @@ func newTransport(baseURL string, cfg clientConfig) *transport {
 	if client == nil {
 		client = http.DefaultClient
 	}
+	rc := DefaultRetryConfig()
+	if cfg.retryConfig != nil {
+		rc = *cfg.retryConfig
+	}
 	return &transport{
-		baseURL:    strings.TrimRight(baseURL, "/"),
-		httpClient: client,
-		authToken:  cfg.authToken,
-		headers:    cfg.headers,
+		baseURL:     strings.TrimRight(baseURL, "/"),
+		httpClient:  client,
+		authToken:   cfg.authToken,
+		headers:     cfg.headers,
+		retryConfig: rc,
+		logger:      cfg.logger,
 	}
 }
 
@@ -46,64 +55,86 @@ func newWorkerTransport(baseURL string, cfg workerConfig) *transport {
 		client = http.DefaultClient
 	}
 	return &transport{
-		baseURL:    strings.TrimRight(baseURL, "/"),
-		httpClient: client,
-		authToken:  cfg.authToken,
+		baseURL:     strings.TrimRight(baseURL, "/"),
+		httpClient:  client,
+		authToken:   cfg.authToken,
+		retryConfig: DefaultRetryConfig(),
+		logger:      cfg.logger,
 	}
 }
 
 // do executes an HTTP request and decodes the JSON response.
+// It automatically retries on 429 (Too Many Requests) responses according to
+// the transport's RetryConfig, respecting the Retry-After header when present.
 func (t *transport) do(ctx context.Context, method, path string, body any, result any) error {
-	var bodyReader io.Reader
+	var bodyData []byte
 	if body != nil {
-		data, err := json.Marshal(body)
+		var err error
+		bodyData, err = json.Marshal(body)
 		if err != nil {
 			return fmt.Errorf("ojs: marshal request: %w", err)
 		}
-		bodyReader = bytes.NewReader(data)
 	}
 
 	url := t.baseURL + path
-	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
-	if err != nil {
-		return fmt.Errorf("ojs: create request: %w", err)
-	}
 
-	if body != nil {
-		req.Header.Set("Content-Type", ojsContentType)
-	}
-	req.Header.Set("Accept", ojsContentType)
-	req.Header.Set("OJS-Version", ojsVersion)
-
-	if t.authToken != "" {
-		req.Header.Set("Authorization", "Bearer "+t.authToken)
-	}
-	for k, v := range t.headers {
-		req.Header.Set(k, v)
-	}
-
-	resp, err := t.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("ojs: request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyLen))
-	if err != nil {
-		return fmt.Errorf("ojs: read response: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
-		return parseErrorResponse(respBody, resp.StatusCode, resp.Header)
-	}
-
-	if result != nil && len(respBody) > 0 {
-		if err := json.Unmarshal(respBody, result); err != nil {
-			return fmt.Errorf("ojs: unmarshal response: %w", err)
+	for attempt := 0; ; attempt++ {
+		var bodyReader io.Reader
+		if bodyData != nil {
+			bodyReader = bytes.NewReader(bodyData)
 		}
-	}
 
-	return nil
+		req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+		if err != nil {
+			return fmt.Errorf("ojs: create request: %w", err)
+		}
+
+		if body != nil {
+			req.Header.Set("Content-Type", ojsContentType)
+		}
+		req.Header.Set("Accept", ojsContentType)
+		req.Header.Set("OJS-Version", ojsVersion)
+
+		if t.authToken != "" {
+			req.Header.Set("Authorization", "Bearer "+t.authToken)
+		}
+		for k, v := range t.headers {
+			req.Header.Set(k, v)
+		}
+
+		resp, err := t.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("ojs: request failed: %w", err)
+		}
+
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyLen))
+		resp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("ojs: read response: %w", err)
+		}
+
+		if t.retryConfig.shouldRetry(resp.StatusCode, attempt) {
+			retryAfter := parseRetryAfter(resp.Header)
+			backoff := t.retryConfig.retryBackoff(attempt, retryAfter)
+			logRetry(t.logger, attempt, t.retryConfig.MaxRetries, backoff, path)
+			if err := sleepWithContext(ctx, backoff); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if resp.StatusCode >= 400 {
+			return parseErrorResponse(respBody, resp.StatusCode, resp.Header)
+		}
+
+		if result != nil && len(respBody) > 0 {
+			if err := json.Unmarshal(respBody, result); err != nil {
+				return fmt.Errorf("ojs: unmarshal response: %w", err)
+			}
+		}
+
+		return nil
+	}
 }
 
 // get performs an HTTP GET request.
