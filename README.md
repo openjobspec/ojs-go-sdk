@@ -7,6 +7,8 @@
 
 The official Go SDK for [Open Job Spec (OJS)](https://openjobspec.org) -- a vendor-neutral, language-agnostic specification for background job processing.
 
+> **🚀 Try it now:** [Open in Playground](https://playground.openjobspec.org?lang=go) · [Run on CodeSandbox](https://codesandbox.io/p/sandbox/openjobspec-go-quickstart) · [Docker Quickstart](https://github.com/openjobspec/openjobspec/blob/main/docker-compose.quickstart.yml)
+
 ## Features
 
 - **Client**: Enqueue jobs, batch operations, workflow management, queue control
@@ -336,7 +338,7 @@ worker.Register("email.send", func(ctx ojs.JobContext) error {
 
 ## OJS Spec Conformance
 
-This SDK implements the [OJS v1.0.0-rc.1](https://openjobspec.org) specification:
+This SDK implements the [OJS v1.0](https://openjobspec.org) specification:
 
 - **Layer 1 (Core)**: Job envelope, lifecycle states, retry policies, unique jobs, workflows, middleware
 - **Layer 2 (Wire Format)**: JSON encoding with `application/openjobspec+json` content type
