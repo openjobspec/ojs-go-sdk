@@ -7,6 +7,15 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
+)
+
+const (
+	// DefaultTimeout is the default maximum duration for processing a single job.
+	DefaultTimeout = 30 * time.Second
+
+	// DefaultMaxBodySize is the default maximum HTTP request body size (1 MB).
+	DefaultMaxBodySize int64 = 1 << 20
 )
 
 // JobEvent represents an OJS job delivered to a serverless function.
@@ -87,19 +96,42 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
+// WithTimeout sets the maximum duration for processing a single job.
+// If the handler does not complete within this duration, the context is
+// cancelled. Default is 30 seconds. Set to 0 to disable.
+func WithTimeout(d time.Duration) Option {
+	return func(h *LambdaHandler) {
+		h.timeout = d
+	}
+}
+
+// WithMaxBodySize sets the maximum allowed HTTP request body size in bytes.
+// Requests exceeding this limit are rejected. Default is 1 MB.
+func WithMaxBodySize(n int64) Option {
+	return func(h *LambdaHandler) {
+		h.maxBodySize = n
+	}
+}
+
 // LambdaHandler processes OJS jobs delivered via SQS or HTTP push.
 type LambdaHandler struct {
-	handlers map[string]HandlerFunc
-	mu       sync.RWMutex
-	ojsURL   string
-	logger   *slog.Logger
+	handlers    map[string]HandlerFunc
+	mu          sync.RWMutex
+	ojsURL      string
+	logger      *slog.Logger
+	timeout     time.Duration
+	maxBodySize int64
+	initialized time.Time
 }
 
 // NewLambdaHandler creates a new serverless handler with the given options.
 func NewLambdaHandler(opts ...Option) *LambdaHandler {
 	h := &LambdaHandler{
-		handlers: make(map[string]HandlerFunc),
-		logger:   slog.Default(),
+		handlers:    make(map[string]HandlerFunc),
+		logger:      slog.Default(),
+		timeout:     DefaultTimeout,
+		maxBodySize: DefaultMaxBodySize,
+		initialized: time.Now(),
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -114,9 +146,20 @@ func (h *LambdaHandler) Register(jobType string, handler HandlerFunc) {
 	h.handlers[jobType] = handler
 }
 
+// Initialized returns the time when the handler was created. This can be used
+// to measure cold start latency in serverless environments by comparing
+// this value against the first request timestamp.
+func (h *LambdaHandler) Initialized() time.Time {
+	return h.initialized
+}
+
 // HandleSQS processes an SQS event containing OJS jobs.
 // It returns partial batch failures so SQS only retries failed messages.
 func (h *LambdaHandler) HandleSQS(ctx context.Context, event SQSEvent) (SQSBatchResponse, error) {
+	if len(event.Records) == 0 {
+		return SQSBatchResponse{}, nil
+	}
+
 	var failures []BatchItemFailure
 
 	for _, record := range event.Records {
@@ -154,7 +197,8 @@ func (h *LambdaHandler) HandleSQS(ctx context.Context, event SQSEvent) (SQSBatch
 }
 
 // HandleHTTP returns an http.HandlerFunc for OJS push delivery.
-// The OJS server POSTs job payloads to this endpoint.
+// The OJS server POSTs job payloads to this endpoint. Request bodies
+// exceeding MaxBodySize are rejected.
 func (h *LambdaHandler) HandleHTTP() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -162,13 +206,26 @@ func (h *LambdaHandler) HandleHTTP() http.HandlerFunc {
 			return
 		}
 
+		body := http.MaxBytesReader(w, r.Body, h.maxBodySize)
 		var req PushDeliveryRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := json.NewDecoder(body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, PushDeliveryResponse{
 				Status: "failed",
 				Error: &PushError{
 					Code:      "invalid_request",
 					Message:   "failed to decode request body",
+					Retryable: false,
+				},
+			})
+			return
+		}
+
+		if req.Job.ID == "" || req.Job.Type == "" {
+			writeJSON(w, http.StatusBadRequest, PushDeliveryResponse{
+				Status: "failed",
+				Error: &PushError{
+					Code:      "invalid_request",
+					Message:   "job id and type are required",
 					Retryable: false,
 				},
 			})
@@ -193,6 +250,46 @@ func (h *LambdaHandler) HandleHTTP() http.HandlerFunc {
 	}
 }
 
+// DirectResponse is the result of processing a single job via direct invocation.
+type DirectResponse struct {
+	Status string `json:"status"` // "completed" or "failed"
+	JobID  string `json:"job_id"`
+	Error  string `json:"error,omitempty"`
+}
+
+// HandleDirect processes a single OJS job event from a direct Lambda invocation.
+// Use this when a Lambda function is invoked directly (not via SQS or HTTP push).
+func (h *LambdaHandler) HandleDirect(ctx context.Context, event JobEvent) (DirectResponse, error) {
+	if event.ID == "" || event.Type == "" {
+		return DirectResponse{
+			Status: "failed",
+			Error:  "job id and type are required",
+		}, nil
+	}
+
+	if err := h.processJob(ctx, event); err != nil {
+		h.logger.Error("job processing failed",
+			"job_id", event.ID,
+			"job_type", event.Type,
+			"error", err,
+		)
+		return DirectResponse{
+			Status: "failed",
+			JobID:  event.ID,
+			Error:  err.Error(),
+		}, nil
+	}
+
+	h.logger.Info("job completed",
+		"job_id", event.ID,
+		"job_type", event.Type,
+	)
+	return DirectResponse{
+		Status: "completed",
+		JobID:  event.ID,
+	}, nil
+}
+
 func (h *LambdaHandler) processJob(ctx context.Context, job JobEvent) error {
 	h.mu.RLock()
 	handler, ok := h.handlers[job.Type]
@@ -200,6 +297,12 @@ func (h *LambdaHandler) processJob(ctx context.Context, job JobEvent) error {
 
 	if !ok {
 		return fmt.Errorf("no handler registered for job type: %s", job.Type)
+	}
+
+	if h.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, h.timeout)
+		defer cancel()
 	}
 
 	return handler(ctx, job)

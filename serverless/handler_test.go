@@ -3,10 +3,12 @@ package serverless
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHandleSQS_Success(t *testing.T) {
@@ -187,5 +189,204 @@ func TestJobEvent_ArgsDeserialization(t *testing.T) {
 	}
 	if job.Priority != 5 {
 		t.Errorf("expected priority 5, got %d", job.Priority)
+	}
+}
+
+func TestHandleSQS_EmptyRecords(t *testing.T) {
+	h := NewLambdaHandler()
+
+	resp, err := h.HandleSQS(context.Background(), SQSEvent{})
+	if err != nil {
+		t.Fatalf("HandleSQS returned error: %v", err)
+	}
+	if len(resp.BatchItemFailures) != 0 {
+		t.Errorf("expected 0 failures for empty event, got %d", len(resp.BatchItemFailures))
+	}
+}
+
+func TestHandleHTTP_MissingJobFields(t *testing.T) {
+	h := NewLambdaHandler()
+
+	// Job with empty type
+	body := `{"job":{"id":"job-1","queue":"default","args":[],"attempt":1},"worker_id":"w1","delivery_id":"d1"}`
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	h.HandleHTTP().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400, got %d", w.Code)
+	}
+
+	var resp PushDeliveryResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Error == nil || resp.Error.Code != "invalid_request" {
+		t.Error("expected invalid_request error")
+	}
+}
+
+func TestHandleDirect_Success(t *testing.T) {
+	h := NewLambdaHandler()
+	h.Register("test.job", func(_ context.Context, _ JobEvent) error {
+		return nil
+	})
+
+	resp, err := h.HandleDirect(context.Background(), JobEvent{
+		ID:      "job-1",
+		Type:    "test.job",
+		Queue:   "default",
+		Attempt: 1,
+	})
+	if err != nil {
+		t.Fatalf("HandleDirect returned error: %v", err)
+	}
+	if resp.Status != "completed" {
+		t.Errorf("expected status 'completed', got '%s'", resp.Status)
+	}
+	if resp.JobID != "job-1" {
+		t.Errorf("expected job ID 'job-1', got '%s'", resp.JobID)
+	}
+}
+
+func TestHandleDirect_MissingFields(t *testing.T) {
+	h := NewLambdaHandler()
+
+	resp, err := h.HandleDirect(context.Background(), JobEvent{})
+	if err != nil {
+		t.Fatalf("HandleDirect returned error: %v", err)
+	}
+	if resp.Status != "failed" {
+		t.Errorf("expected status 'failed', got '%s'", resp.Status)
+	}
+	if resp.Error == "" {
+		t.Error("expected error message")
+	}
+}
+
+func TestHandleDirect_HandlerError(t *testing.T) {
+	h := NewLambdaHandler()
+	h.Register("fail.job", func(_ context.Context, _ JobEvent) error {
+		return fmt.Errorf("boom")
+	})
+
+	resp, err := h.HandleDirect(context.Background(), JobEvent{
+		ID:   "job-1",
+		Type: "fail.job",
+	})
+	if err != nil {
+		t.Fatalf("HandleDirect returned error: %v", err)
+	}
+	if resp.Status != "failed" {
+		t.Errorf("expected status 'failed', got '%s'", resp.Status)
+	}
+}
+
+func TestProcessJob_Timeout(t *testing.T) {
+	h := NewLambdaHandler(WithTimeout(50 * time.Millisecond))
+
+	h.Register("slow.job", func(ctx context.Context, _ JobEvent) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+			return nil
+		}
+	})
+
+	err := h.processJob(context.Background(), JobEvent{
+		ID:   "job-1",
+		Type: "slow.job",
+	})
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if err != context.DeadlineExceeded {
+		t.Errorf("expected DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestProcessJob_NoTimeout(t *testing.T) {
+	h := NewLambdaHandler(WithTimeout(0))
+
+	h.Register("fast.job", func(_ context.Context, _ JobEvent) error {
+		return nil
+	})
+
+	err := h.processJob(context.Background(), JobEvent{
+		ID:   "job-1",
+		Type: "fast.job",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestProcessJob_ContextCancellation(t *testing.T) {
+	h := NewLambdaHandler(WithTimeout(0)) // no timeout, rely on parent ctx
+
+	h.Register("blocking.job", func(ctx context.Context, _ JobEvent) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	err := h.processJob(ctx, JobEvent{
+		ID:   "job-1",
+		Type: "blocking.job",
+	})
+	if err != context.Canceled {
+		t.Errorf("expected Canceled, got %v", err)
+	}
+}
+
+func TestLambdaHandler_Initialized(t *testing.T) {
+	before := time.Now()
+	h := NewLambdaHandler()
+	after := time.Now()
+
+	init := h.Initialized()
+	if init.Before(before) || init.After(after) {
+		t.Error("Initialized() should return a time between before and after creation")
+	}
+}
+
+func TestLambdaHandler_WithOptions(t *testing.T) {
+	h := NewLambdaHandler(
+		WithOJSURL("https://ojs.example.com"),
+		WithTimeout(10*time.Second),
+		WithMaxBodySize(512),
+	)
+
+	if h.ojsURL != "https://ojs.example.com" {
+		t.Errorf("expected ojsURL 'https://ojs.example.com', got '%s'", h.ojsURL)
+	}
+	if h.timeout != 10*time.Second {
+		t.Errorf("expected timeout 10s, got %v", h.timeout)
+	}
+	if h.maxBodySize != 512 {
+		t.Errorf("expected maxBodySize 512, got %d", h.maxBodySize)
+	}
+}
+
+func TestHandleHTTP_BodyTooLarge(t *testing.T) {
+	h := NewLambdaHandler(WithMaxBodySize(10)) // very small limit
+	h.Register("email.send", func(_ context.Context, _ JobEvent) error {
+		return nil
+	})
+
+	body := `{"job":{"id":"job-1","type":"email.send","queue":"default","args":[],"attempt":1},"worker_id":"w1","delivery_id":"d1"}`
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	h.HandleHTTP().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400 for oversized body, got %d", w.Code)
 	}
 }
