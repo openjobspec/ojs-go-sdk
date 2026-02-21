@@ -286,3 +286,4 @@ func TestMetrics_Failure(t *testing.T) {
 		t.Errorf("expected 0 completed events, got %d", len(rec.completed))
 	}
 }
+
