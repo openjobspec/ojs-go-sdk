@@ -1,4 +1,4 @@
-// Copyright 2026 The Open Job Spec Authors
+// Copyright 2025 The Open Job Spec Authors
 // SPDX-License-Identifier: Apache-2.0
 
 // Package ojsgrpc provides an optional gRPC transport for the OJS Go SDK.
