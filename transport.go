@@ -30,10 +30,12 @@ type transport struct {
 	logger      *slog.Logger
 }
 
+const defaultHTTPTimeout = 30 * time.Second
+
 func newTransport(baseURL string, cfg clientConfig) *transport {
 	client := cfg.httpClient
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 	rc := DefaultRetryConfig()
 	if cfg.retryConfig != nil {
@@ -52,7 +54,7 @@ func newTransport(baseURL string, cfg clientConfig) *transport {
 func newWorkerTransport(baseURL string, cfg workerConfig) *transport {
 	client := cfg.httpClient
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 	return &transport{
 		baseURL:     strings.TrimRight(baseURL, "/"),
