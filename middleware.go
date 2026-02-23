@@ -1,5 +1,7 @@
 package ojs
 
+import "slices"
+
 // HandlerFunc is a function that processes a job.
 type HandlerFunc func(JobContext) error
 
@@ -45,8 +47,7 @@ func (c *middlewareChain) Prepend(name string, fn MiddlewareFunc) {
 func (c *middlewareChain) InsertBefore(existing string, name string, fn MiddlewareFunc) {
 	for i, m := range c.middleware {
 		if m.name == existing {
-			c.middleware = append(c.middleware[:i+1], c.middleware[i:]...)
-			c.middleware[i] = namedMiddleware{name: name, fn: fn}
+			c.middleware = slices.Insert(c.middleware, i, namedMiddleware{name: name, fn: fn})
 			return
 		}
 	}
@@ -58,8 +59,7 @@ func (c *middlewareChain) InsertBefore(existing string, name string, fn Middlewa
 func (c *middlewareChain) InsertAfter(existing string, name string, fn MiddlewareFunc) {
 	for i, m := range c.middleware {
 		if m.name == existing {
-			c.middleware = append(c.middleware[:i+2], c.middleware[i+1:]...)
-			c.middleware[i+1] = namedMiddleware{name: name, fn: fn}
+			c.middleware = slices.Insert(c.middleware, i+1, namedMiddleware{name: name, fn: fn})
 			return
 		}
 	}

@@ -109,3 +109,68 @@ func readSSEStream(ctx context.Context, resp *http.Response, handler EventHandle
 		}
 	}
 }
+
+// SubscribeWithReconnect is like Subscribe but automatically reconnects with
+// exponential backoff when the SSE connection drops. It keeps retrying until
+// the context is cancelled or Cancel() is called.
+func (c *Client) SubscribeWithReconnect(ctx context.Context, channel string, handler EventHandler) *Subscription {
+	subCtx, cancel := context.WithCancel(ctx)
+	sub := &Subscription{
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
+
+	go func() {
+		defer close(sub.done)
+		backoff := 1 * time.Second
+		const maxBackoff = 30 * time.Second
+
+		for {
+			err := c.subscribeOnce(subCtx, channel, handler)
+			if subCtx.Err() != nil {
+				return
+			}
+			if err != nil && c.transport.logger != nil {
+				c.transport.logger.Warn("SSE connection lost, reconnecting",
+					"channel", channel, "backoff", backoff, "error", err)
+			}
+
+			select {
+			case <-subCtx.Done():
+				return
+			case <-time.After(backoff):
+			}
+
+			backoff = min(backoff*2, maxBackoff)
+		}
+	}()
+
+	return sub
+}
+
+// subscribeOnce opens a single SSE connection and reads until it closes or errors.
+func (c *Client) subscribeOnce(ctx context.Context, channel string, handler EventHandler) error {
+	url := fmt.Sprintf("%s/ojs/v1/events/stream?channel=%s", c.transport.baseURL, channel)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Cache-Control", "no-cache")
+	if c.transport.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.transport.authToken)
+	}
+
+	resp, err := c.transport.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("server returned %d", resp.StatusCode)
+	}
+
+	readSSEStream(ctx, resp, handler)
+	return nil
+}
