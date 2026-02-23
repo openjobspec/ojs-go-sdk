@@ -482,6 +482,68 @@ func TestMiddlewareInsertBeforeAfterExecution(t *testing.T) {
 	}
 }
 
+// TestMiddlewareInsertBeforeLargeChain is a regression test for slice corruption
+// when InsertBefore is called on chains with extra backing-array capacity.
+func TestMiddlewareInsertBeforeLargeChain(t *testing.T) {
+	chain := newMiddlewareChain()
+	noop := func(ctx JobContext, next HandlerFunc) error { return next(ctx) }
+
+	chain.Add("a", noop)
+	chain.Add("b", noop)
+	chain.Add("c", noop)
+	chain.Add("d", noop)
+	chain.Add("e", noop)
+
+	// Insert before "b" — with 5 elements, backing array likely has extra capacity.
+	chain.InsertBefore("b", "x", noop)
+
+	names := make([]string, len(chain.middleware))
+	for i, m := range chain.middleware {
+		names[i] = m.name
+	}
+	expected := []string{"a", "x", "b", "c", "d", "e"}
+	if len(names) != len(expected) {
+		t.Fatalf("expected %d, got %d: %v", len(expected), len(names), names)
+	}
+	for i, name := range expected {
+		if names[i] != name {
+			t.Errorf("position %d: expected %s, got %s (order: %v)", i, name, names[i], names)
+		}
+	}
+}
+
+// TestMiddlewareInsertAfterLargeChain is a regression test for InsertAfter on
+// chains with extra capacity and when inserting after the last element.
+func TestMiddlewareInsertAfterLargeChain(t *testing.T) {
+	chain := newMiddlewareChain()
+	noop := func(ctx JobContext, next HandlerFunc) error { return next(ctx) }
+
+	chain.Add("a", noop)
+	chain.Add("b", noop)
+	chain.Add("c", noop)
+	chain.Add("d", noop)
+
+	// Insert after "b" (middle) — tests element shifting.
+	chain.InsertAfter("b", "x", noop)
+
+	// Insert after "d" (was last) — previously could panic with out-of-bounds.
+	chain.InsertAfter("d", "y", noop)
+
+	names := make([]string, len(chain.middleware))
+	for i, m := range chain.middleware {
+		names[i] = m.name
+	}
+	expected := []string{"a", "b", "x", "c", "d", "y"}
+	if len(names) != len(expected) {
+		t.Fatalf("expected %d, got %d: %v", len(expected), len(names), names)
+	}
+	for i, name := range expected {
+		if names[i] != name {
+			t.Errorf("position %d: expected %s, got %s (order: %v)", i, name, names[i], names)
+		}
+	}
+}
+
 func TestFetchBackoff(t *testing.T) {
 	base := 1 * time.Second
 
