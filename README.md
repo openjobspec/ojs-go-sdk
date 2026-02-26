@@ -348,4 +348,3 @@ This SDK implements the [OJS v1.0](https://openjobspec.org) specification:
 ## License
 
 Apache 2.0 -- see [LICENSE](LICENSE).
-
