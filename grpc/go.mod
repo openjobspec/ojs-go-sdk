@@ -1,6 +1,6 @@
 module github.com/openjobspec/ojs-go-sdk/grpc
 
-go 1.24
+go 1.24.0
 
 toolchain go1.24.4
 
