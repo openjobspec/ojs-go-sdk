@@ -229,6 +229,36 @@ jobs, err := client.EnqueueBatch(ctx, []ojs.JobRequest{
 
 ### Workflows
 
+OJS provides three workflow primitives for composing multi-step job pipelines:
+
+**Chain** — sequential steps, each starts after the previous completes:
+```mermaid
+graph LR
+    A[Step 1: Fetch] --> B[Step 2: Transform] --> C[Step 3: Load]
+```
+
+**Group** — parallel fan-out/fan-in, all jobs run simultaneously:
+```mermaid
+graph TD
+    S[Start] --> A[Export CSV]
+    S --> B[Export PDF]
+    A --> J[All Complete]
+    B --> J
+```
+
+**Batch** — parallel execution with completion callbacks:
+```mermaid
+graph TD
+    S[Batch] --> A[Job 1]
+    S --> B[Job 2]
+    S --> C[Job N]
+    A --> CB{All Done?}
+    B --> CB
+    C --> CB
+    CB -->|on_complete| D[Report]
+    CB -->|on_failure| E[Alert]
+```
+
 ```go
 // Chain: sequential steps.
 wf, err := client.CreateWorkflow(ctx, ojs.Chain(
@@ -335,6 +365,26 @@ worker.Register("email.send", func(ctx ojs.JobContext) error {
 | `WithLabels(l...)` | Worker labels |
 | `WithPollInterval(d)` | Fetch poll interval (default: `1s`) |
 | `WithLogger(l)` | Structured logger (`*slog.Logger`) for operational events |
+
+## Real-Time Subscriptions
+
+Subscribe to job state changes via Server-Sent Events (SSE):
+
+```go
+// Subscribe to all events
+events, cancel := client.Subscribe(ctx)
+defer cancel()
+
+for event := range events {
+    fmt.Printf("Job %s: %s → %s\n", event.JobID, event.From, event.To)
+}
+
+// Subscribe to a specific job
+events, cancel := client.SubscribeJob(ctx, jobID)
+
+// Subscribe to a queue
+events, cancel := client.SubscribeQueue(ctx, "emails")
+```
 
 ## OJS Spec Conformance
 
