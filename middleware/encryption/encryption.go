@@ -160,3 +160,4 @@ func EncryptArgs(provider KeyProvider, args json.RawMessage) (json.RawMessage, m
 
 	return encArgs, meta, nil
 }
+
