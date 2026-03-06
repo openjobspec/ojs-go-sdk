@@ -142,3 +142,4 @@ func LookupByCanonicalCode(canonical string) (ErrorCodeEntry, bool) {
 	}
 	return ErrorCodeEntry{}, false
 }
+
