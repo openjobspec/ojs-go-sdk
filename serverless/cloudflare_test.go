@@ -265,3 +265,4 @@ func TestCloudflareHandler_ServeHTTP_MissingJobFields(t *testing.T) {
 		t.Errorf("expected status 400, got %d", w.Code)
 	}
 }
+
