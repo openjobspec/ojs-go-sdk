@@ -2,6 +2,7 @@ package encryption
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 
@@ -88,16 +89,24 @@ func TestEncryptArgs(t *testing.T) {
 		t.Fatalf("EncryptArgs: %v", err)
 	}
 
-	if meta[MetaKeyEncrypted] != true {
-		t.Error("expected encrypted=true in meta")
+	encodings, ok := meta[MetaKeyEncodings].([]string)
+	if !ok || len(encodings) != 1 || encodings[0] != EncodingBinaryEncrypted {
+		t.Errorf("expected encodings=[binary/encrypted], got %v", meta[MetaKeyEncodings])
 	}
 	if meta[MetaKeyKeyID] != "k1" {
 		t.Error("expected key_id in meta")
 	}
 
-	// Verify the encrypted args are different from original
-	if string(encArgs) == string(args) {
-		t.Error("encrypted args should differ")
+	// Verify the encrypted args contain the ojs_encoded flag
+	var payload map[string]interface{}
+	if err := json.Unmarshal(encArgs, &payload); err != nil {
+		t.Fatalf("expected JSON object in encrypted args: %v", err)
+	}
+	if payload[ArgsKeyEncoded] != true {
+		t.Error("expected ojs_encoded=true in encrypted args")
+	}
+	if _, ok := payload["data"].(string); !ok {
+		t.Error("expected data string in encrypted args")
 	}
 }
 
@@ -114,15 +123,15 @@ func TestMiddlewareDecryptsArgs(t *testing.T) {
 		return nil
 	}
 
-	// Parse the encrypted args string out of the JSON
-	var encStr string
-	json.Unmarshal(encArgs, &encStr)
+	// Parse the encrypted args object out of the JSON
+	var encObj map[string]interface{}
+	json.Unmarshal(encArgs, &encObj)
 
 	mw := EncryptMiddleware(provider)
 	ctx := ojs.JobContext{
 		Job: ojs.Job{
 			ID:      "job-1",
-			RawArgs: []any{encStr},
+			RawArgs: []any{encObj},
 			Meta:    meta,
 		},
 	}
@@ -153,5 +162,46 @@ func TestMiddlewareSkipsUnencrypted(t *testing.T) {
 
 	if receivedArgs["key"] != "value" {
 		t.Error("unencrypted args should pass through unchanged")
+	}
+}
+
+func TestMiddlewareDecryptsLegacyFormat(t *testing.T) {
+	key := testKey()
+	provider, _ := NewStaticKeyProvider("k1", key)
+	originalArgs := json.RawMessage(`{"to":"legacy@example.com","msg":"old"}`)
+
+	// Simulate a job encrypted with the old format: plain base64 string + legacy meta keys
+	encKey, _ := provider.GetKey("k1")
+	ciphertext, _ := Encrypt(encKey, originalArgs)
+	encStr := base64.StdEncoding.EncodeToString(ciphertext)
+
+	legacyMeta := map[string]interface{}{
+		LegacyMetaKeyEncrypted: true,
+		LegacyMetaKeyAlgorithm: "AES-256-GCM",
+		LegacyMetaKeyKeyID:     "k1",
+	}
+
+	var decryptedArgs ojs.Args
+	handler := func(ctx ojs.JobContext) error {
+		decryptedArgs = ctx.Job.Args
+		return nil
+	}
+
+	mw := EncryptMiddleware(provider)
+	ctx := ojs.JobContext{
+		Job: ojs.Job{
+			ID:      "legacy-job",
+			RawArgs: []any{encStr},
+			Meta:    legacyMeta,
+		},
+	}
+
+	err := mw(ctx, handler)
+	if err != nil {
+		t.Fatalf("middleware (legacy): %v", err)
+	}
+
+	if decryptedArgs["to"] != "legacy@example.com" {
+		t.Errorf("expected decrypted legacy args, got %v", decryptedArgs)
 	}
 }

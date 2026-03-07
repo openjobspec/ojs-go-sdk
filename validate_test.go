@@ -40,15 +40,25 @@ func TestValidateQueue(t *testing.T) {
 		{"empty queue (default)", "", false},
 		{"valid with hyphens", "my-queue", false},
 		{"valid with dots", "queue.v2", false},
+		{"valid multi-segment", "email.send.priority", false},
+		{"valid single char", "q", false},
 		{"uppercase invalid", "MyQueue", true},
 		{"too long", strings.Repeat("a", 129), true},
 		{"at max length", strings.Repeat("a", 128), false},
+		{"trailing dot invalid", "queue.", true},
+		{"trailing hyphen invalid", "queue-", true},
+		{"leading dot invalid", ".queue", true},
+		{"leading hyphen invalid", "-queue", true},
+		{"consecutive dots invalid", "queue..name", true},
+		{"consecutive hyphens invalid", "queue--name", true},
+		{"dot-hyphen combo invalid", "queue.-name", true},
+		{"hyphen-dot combo invalid", "queue-.name", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := validateQueue(tt.queue)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("validateQueue() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("validateQueue(%q) error = %v, wantErr %v", tt.queue, err, tt.wantErr)
 			}
 		})
 	}

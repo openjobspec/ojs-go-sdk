@@ -117,7 +117,11 @@ func (j Job) MarshalJSON() ([]byte, error) {
 		ExpiresAt:     j.ExpiresAt,
 		PreviousState: j.PreviousState,
 	}
-	raw.Args, _ = json.Marshal(argsToWire(j.Args))
+	argsBytes, err := json.Marshal(argsToWire(j.Args))
+	if err != nil {
+		return nil, fmt.Errorf("ojs: failed to marshal job args: %w", err)
+	}
+	raw.Args = argsBytes
 	return json.Marshal(raw)
 }
 

@@ -7,7 +7,7 @@ import (
 
 var (
 	typePattern  = regexp.MustCompile(`^[a-z][a-z0-9_\-]*(\.[a-z][a-z0-9_\-]*)*$`)
-	queuePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9\-\.]*$`)
+	queuePattern = regexp.MustCompile(`^[a-z0-9]+([.\-][a-z0-9]+)*$`)
 )
 
 const (
@@ -41,7 +41,7 @@ func validateQueue(queue string) error {
 		return fmt.Errorf("ojs: queue name must not exceed %d characters, got %d", maxQueueLength, len(queue))
 	}
 	if !queuePattern.MatchString(queue) {
-		return fmt.Errorf("ojs: invalid queue name %q: must match pattern ^[a-z0-9][a-z0-9\\-\\.]*$", queue)
+		return fmt.Errorf("ojs: invalid queue name %q: must be lowercase alphanumeric, separated by single dots or hyphens (e.g., \"my-queue\", \"jobs.v2\")", queue)
 	}
 	return nil
 }

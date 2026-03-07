@@ -19,12 +19,25 @@ import (
 )
 
 const (
-	// MetaKeyEncrypted marks a job's args as encrypted.
-	MetaKeyEncrypted = "ojs.encryption.encrypted"
-	// MetaKeyAlgorithm records the encryption algorithm used.
-	MetaKeyAlgorithm = "ojs.encryption.algorithm"
-	// MetaKeyKeyID records which key was used (for rotation).
-	MetaKeyKeyID = "ojs.encryption.key_id"
+	// Spec-compliant meta keys (ojs-encryption.md).
+	MetaKeyEncodings = "ojs.codec.encodings"
+	MetaKeyKeyID     = "ojs.codec.key_id"
+
+	// EncodingBinaryEncrypted is the encoding value for encrypted payloads.
+	EncodingBinaryEncrypted = "binary/encrypted"
+
+	// ArgsKeyEncoded is the key inside an args element that marks it as encoded.
+	ArgsKeyEncoded = "ojs_encoded"
+
+	// Legacy meta keys kept for backward-compatible decryption of existing jobs.
+	LegacyMetaKeyEncrypted = "ojs.encryption.encrypted"
+	LegacyMetaKeyAlgorithm = "ojs.encryption.algorithm"
+	LegacyMetaKeyKeyID     = "ojs.encryption.key_id"
+
+	// Deprecated: use MetaKeyEncodings.
+	MetaKeyEncrypted = LegacyMetaKeyEncrypted
+	// Deprecated: use MetaKeyEncodings with EncodingBinaryEncrypted.
+	MetaKeyAlgorithm = LegacyMetaKeyAlgorithm
 )
 
 // KeyProvider supplies encryption keys. Implement this for KMS integration.
@@ -91,29 +104,30 @@ func Decrypt(key, ciphertext []byte) ([]byte, error) {
 }
 
 // EncryptMiddleware returns worker middleware that decrypts job args before processing.
+// It supports both spec-compliant meta keys (ojs.codec.*) and legacy keys
+// (ojs.encryption.*) so that existing encrypted jobs continue to work.
 func EncryptMiddleware(provider KeyProvider) ojs.MiddlewareFunc {
 	return func(ctx ojs.JobContext, next ojs.HandlerFunc) error {
 		if ctx.Job.Meta == nil {
 			return next(ctx)
 		}
 
-		encrypted, ok := ctx.Job.Meta[MetaKeyEncrypted].(bool)
-		if !ok || !encrypted {
+		keyID, encrypted := detectEncryption(ctx.Job.Meta)
+		if !encrypted {
 			return next(ctx)
 		}
 
-		keyID, _ := ctx.Job.Meta[MetaKeyKeyID].(string)
 		key, err := provider.GetKey(keyID)
 		if err != nil {
 			return fmt.Errorf("encryption key %s not found: %w", keyID, err)
 		}
 
-		// The encrypted payload is stored as a base64 string in RawArgs[0]
 		if len(ctx.Job.RawArgs) == 0 {
 			return next(ctx)
 		}
-		encryptedStr, ok := ctx.Job.RawArgs[0].(string)
-		if !ok {
+
+		encryptedStr, err := extractEncryptedData(ctx.Job.RawArgs[0])
+		if err != nil {
 			return next(ctx)
 		}
 
@@ -137,7 +151,62 @@ func EncryptMiddleware(provider KeyProvider) ojs.MiddlewareFunc {
 	}
 }
 
+// detectEncryption checks meta for encryption markers using spec-compliant keys
+// first, then falls back to legacy keys for backward compatibility.
+func detectEncryption(meta map[string]interface{}) (keyID string, encrypted bool) {
+	if encodings, ok := meta[MetaKeyEncodings]; ok {
+		if hasEncryptionEncoding(encodings) {
+			keyID, _ = meta[MetaKeyKeyID].(string)
+			return keyID, true
+		}
+	}
+
+	// Legacy: ojs.encryption.encrypted + ojs.encryption.key_id
+	if enc, ok := meta[LegacyMetaKeyEncrypted].(bool); ok && enc {
+		keyID, _ = meta[LegacyMetaKeyKeyID].(string)
+		return keyID, true
+	}
+
+	return "", false
+}
+
+func hasEncryptionEncoding(v interface{}) bool {
+	switch encodings := v.(type) {
+	case []interface{}:
+		for _, e := range encodings {
+			if s, ok := e.(string); ok && s == EncodingBinaryEncrypted {
+				return true
+			}
+		}
+	case []string:
+		for _, s := range encodings {
+			if s == EncodingBinaryEncrypted {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// extractEncryptedData handles both the new args format (object with ojs_encoded
+// flag) and the legacy plain base64 string format.
+func extractEncryptedData(arg interface{}) (string, error) {
+	if m, ok := arg.(map[string]interface{}); ok {
+		if encoded, ok := m[ArgsKeyEncoded].(bool); ok && encoded {
+			if data, ok := m["data"].(string); ok {
+				return data, nil
+			}
+		}
+	}
+	if s, ok := arg.(string); ok {
+		return s, nil
+	}
+	return "", fmt.Errorf("unrecognized encrypted args format")
+}
+
 // EncryptArgs encrypts job args for enqueue. Call this before client.Enqueue().
+// Sets spec-compliant meta keys: ojs.codec.encodings and ojs.codec.key_id.
+// The encrypted payload is wrapped in an object with ojs_encoded: true.
 func EncryptArgs(provider KeyProvider, args json.RawMessage) (json.RawMessage, map[string]interface{}, error) {
 	key, err := provider.GetKey(provider.CurrentKeyID())
 	if err != nil {
@@ -150,11 +219,14 @@ func EncryptArgs(provider KeyProvider, args json.RawMessage) (json.RawMessage, m
 	}
 
 	encoded := base64.StdEncoding.EncodeToString(ciphertext)
-	encArgs, _ := json.Marshal(encoded)
+	encPayload := map[string]interface{}{
+		ArgsKeyEncoded: true,
+		"data":         encoded,
+	}
+	encArgs, _ := json.Marshal(encPayload)
 
 	meta := map[string]interface{}{
-		MetaKeyEncrypted: true,
-		MetaKeyAlgorithm: "AES-256-GCM",
+		MetaKeyEncodings: []string{EncodingBinaryEncrypted},
 		MetaKeyKeyID:     provider.CurrentKeyID(),
 	}
 

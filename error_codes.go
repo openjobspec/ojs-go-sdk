@@ -102,44 +102,56 @@ var (
 	CodeMiddlewareTimeout    = ErrorCodeEntry{"OJS-7004", "MiddlewareTimeout", "", 504, "A middleware handler exceeded its allowed execution time", true}
 )
 
-// AllErrorCodes returns all defined OJS error catalog entries.
-func AllErrorCodes() []ErrorCodeEntry {
-	return []ErrorCodeEntry{
-		// OJS-1xxx
-		CodeInvalidPayload, CodeInvalidJobType, CodeInvalidQueue, CodeInvalidArgs,
-		CodeInvalidMetadata, CodeInvalidStateTransition, CodeInvalidRetryPolicy,
-		CodeInvalidCronExpression, CodeSchemaValidationFailed, CodePayloadTooLarge,
-		CodeMetadataTooLarge, CodeConnectionError, CodeRequestTimeout, CodeSerializationError,
-		CodeQueueNameTooLong, CodeJobTypeTooLong, CodeChecksumMismatch, CodeUnsupportedCompression,
-		// OJS-2xxx
-		CodeBackendError, CodeBackendUnavailable, CodeBackendTimeout, CodeReplicationLag,
-		CodeInternalServerError,
-		// OJS-3xxx
-		CodeJobNotFound, CodeDuplicateJob, CodeJobAlreadyCompleted, CodeJobAlreadyCancelled,
-		CodeQueuePaused, CodeHandlerError, CodeHandlerTimeout, CodeHandlerPanic,
-		CodeNonRetryableError, CodeJobCancelled, CodeNoHandlerRegistered,
-		// OJS-4xxx
-		CodeWorkflowNotFound, CodeChainStepFailed, CodeGroupTimeout, CodeDependencyFailed,
-		CodeCyclicDependency, CodeBatchCallbackFailed, CodeWorkflowCancelled,
-		// OJS-5xxx
-		CodeUnauthenticated, CodePermissionDenied, CodeTokenExpired, CodeTenantAccessDenied,
-		// OJS-6xxx
-		CodeRateLimited, CodeQueueFull, CodeConcurrencyLimited, CodeBackpressureApplied,
-		// OJS-7xxx
-		CodeUnsupportedFeature, CodeCronScheduleConflict, CodeUniqueKeyInvalid,
-		CodeMiddlewareError, CodeMiddlewareTimeout,
-	}
+// AllErrorCodes contains every defined OJS error catalog entry.
+var AllErrorCodes = []ErrorCodeEntry{
+	// OJS-1xxx
+	CodeInvalidPayload, CodeInvalidJobType, CodeInvalidQueue, CodeInvalidArgs,
+	CodeInvalidMetadata, CodeInvalidStateTransition, CodeInvalidRetryPolicy,
+	CodeInvalidCronExpression, CodeSchemaValidationFailed, CodePayloadTooLarge,
+	CodeMetadataTooLarge, CodeConnectionError, CodeRequestTimeout, CodeSerializationError,
+	CodeQueueNameTooLong, CodeJobTypeTooLong, CodeChecksumMismatch, CodeUnsupportedCompression,
+	// OJS-2xxx
+	CodeBackendError, CodeBackendUnavailable, CodeBackendTimeout, CodeReplicationLag,
+	CodeInternalServerError,
+	// OJS-3xxx
+	CodeJobNotFound, CodeDuplicateJob, CodeJobAlreadyCompleted, CodeJobAlreadyCancelled,
+	CodeQueuePaused, CodeHandlerError, CodeHandlerTimeout, CodeHandlerPanic,
+	CodeNonRetryableError, CodeJobCancelled, CodeNoHandlerRegistered,
+	// OJS-4xxx
+	CodeWorkflowNotFound, CodeChainStepFailed, CodeGroupTimeout, CodeDependencyFailed,
+	CodeCyclicDependency, CodeBatchCallbackFailed, CodeWorkflowCancelled,
+	// OJS-5xxx
+	CodeUnauthenticated, CodePermissionDenied, CodeTokenExpired, CodeTenantAccessDenied,
+	// OJS-6xxx
+	CodeRateLimited, CodeQueueFull, CodeConcurrencyLimited, CodeBackpressureApplied,
+	// OJS-7xxx
+	CodeUnsupportedFeature, CodeCronScheduleConflict, CodeUniqueKeyInvalid,
+	CodeMiddlewareError, CodeMiddlewareTimeout,
 }
 
-// LookupByCanonicalCode returns the ErrorCodeEntry for a canonical wire-format code
-// (e.g., "INVALID_PAYLOAD"). Returns the entry and true if found, or a zero entry and
-// false if the canonical code is not recognized.
-func LookupByCanonicalCode(canonical string) (ErrorCodeEntry, bool) {
-	for _, e := range AllErrorCodes() {
-		if e.CanonicalCode == canonical {
-			return e, true
+// LookupByCode returns the ErrorCodeEntry for an OJS-XXXX numeric code
+// (e.g., "OJS-1000"). Returns nil if the code is not recognized.
+func LookupByCode(code string) *ErrorCodeEntry {
+	for i := range AllErrorCodes {
+		if AllErrorCodes[i].Code == code {
+			return &AllErrorCodes[i]
 		}
 	}
-	return ErrorCodeEntry{}, false
+	return nil
+}
+
+// LookupByCanonicalCode returns the ErrorCodeEntry for a canonical wire-format
+// code (e.g., "INVALID_PAYLOAD"). Returns nil if the canonical code is not
+// recognized or is empty.
+func LookupByCanonicalCode(canonical string) *ErrorCodeEntry {
+	if canonical == "" {
+		return nil
+	}
+	for i := range AllErrorCodes {
+		if AllErrorCodes[i].CanonicalCode == canonical {
+			return &AllErrorCodes[i]
+		}
+	}
+	return nil
 }
 
