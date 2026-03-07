@@ -643,3 +643,4 @@ func TestWithGPUZeroMemory(t *testing.T) {
 		t.Error("expected no memory_gb when set to 0")
 	}
 }
+
