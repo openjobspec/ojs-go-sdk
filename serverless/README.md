@@ -195,3 +195,4 @@ For SQS, the Lambda adapter returns partial batch failures (`SQSBatchResponse`) 
 ## SAM Template
 
 See `template/template.yaml` for a ready-to-use AWS SAM template that deploys a Lambda function with SQS event source mapping and dead letter queue.
+
