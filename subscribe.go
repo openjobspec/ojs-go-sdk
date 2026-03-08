@@ -76,7 +76,8 @@ func (c *Client) SubscribeQueue(ctx context.Context, queue string, handler Event
 
 func readSSEStream(ctx context.Context, resp *http.Response, handler EventHandler) {
 	scanner := bufio.NewScanner(resp.Body)
-	var eventType, data string
+	var eventType string
+	var dataLines []string
 
 	for scanner.Scan() {
 		select {
@@ -88,24 +89,28 @@ func readSSEStream(ctx context.Context, resp *http.Response, handler EventHandle
 		line := scanner.Text()
 
 		if line == "" {
-			if data != "" {
+			if len(dataLines) > 0 {
 				evt := Event{
 					Type:   eventType,
 					Source: "sse",
 					Time:   time.Now(),
-					Data:   map[string]any{"raw": data},
+					Data:   map[string]any{"raw": strings.Join(dataLines, "\n")},
 				}
 				handler(evt)
 			}
 			eventType = ""
-			data = ""
+			dataLines = dataLines[:0]
 			continue
 		}
 
-		if strings.HasPrefix(line, "event: ") {
+		if strings.HasPrefix(line, ":") {
+			continue // SSE comment line — ignore per spec
+		} else if strings.HasPrefix(line, "event: ") {
 			eventType = strings.TrimPrefix(line, "event: ")
 		} else if strings.HasPrefix(line, "data: ") {
-			data = strings.TrimPrefix(line, "data: ")
+			dataLines = append(dataLines, strings.TrimPrefix(line, "data: "))
+		} else if line == "data" {
+			dataLines = append(dataLines, "")
 		}
 	}
 }

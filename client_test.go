@@ -163,6 +163,55 @@ func TestEnqueueBatch(t *testing.T) {
 	}
 }
 
+func TestEnqueueBatchPartialError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", ojsContentType)
+		w.WriteHeader(http.StatusCreated)
+		// Server returns 2 jobs but count indicates 3 were expected
+		json.NewEncoder(w).Encode(map[string]any{
+			"jobs": []map[string]any{
+				{"id": "job-1", "type": "email.send", "state": "available", "args": []any{}, "queue": "default"},
+				{"id": "job-2", "type": "email.send", "state": "available", "args": []any{}, "queue": "default"},
+			},
+			"count": 3,
+		})
+	}))
+	defer server.Close()
+
+	client, _ := NewClient(server.URL)
+	jobs, err := client.EnqueueBatch(context.Background(), []JobRequest{
+		{Type: "email.send", Args: Args{}},
+		{Type: "email.send", Args: Args{}},
+		{Type: "email.send", Args: Args{}},
+	})
+
+	if err == nil {
+		t.Fatal("expected error for partial batch, got nil")
+	}
+
+	var partialErr *BatchPartialError
+	if !errors.As(err, &partialErr) {
+		t.Fatalf("expected *BatchPartialError, got %T: %v", err, err)
+	}
+	if partialErr.Submitted != 3 {
+		t.Errorf("expected Submitted=3, got %d", partialErr.Submitted)
+	}
+	if partialErr.Succeeded != 2 {
+		t.Errorf("expected Succeeded=2, got %d", partialErr.Succeeded)
+	}
+	if len(partialErr.Jobs) != 2 {
+		t.Errorf("expected 2 jobs, got %d", len(partialErr.Jobs))
+	}
+	if len(jobs) != 2 {
+		t.Errorf("expected 2 jobs returned, got %d", len(jobs))
+	}
+
+	expected := "ojs: batch partial failure: 2/3 jobs enqueued"
+	if partialErr.Error() != expected {
+		t.Errorf("expected %q, got %q", expected, partialErr.Error())
+	}
+}
+
 func TestGetJob(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -336,7 +385,7 @@ func TestErrorRetryAfterHeader(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, _ := NewClient(server.URL)
+	client, _ := NewClient(server.URL, WithRetryConfig(RetryConfig{Enabled: false}))
 	_, err := client.Enqueue(context.Background(), "test", Args{})
 
 	var ojsErr *Error
@@ -362,7 +411,7 @@ func TestErrorRetryAfterHeaderAbsent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, _ := NewClient(server.URL)
+	client, _ := NewClient(server.URL, WithRetryConfig(RetryConfig{Enabled: false}))
 	_, err := client.Enqueue(context.Background(), "test", Args{})
 
 	var ojsErr *Error
@@ -392,7 +441,7 @@ func TestErrorRateLimitInfoHeaders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, _ := NewClient(server.URL)
+	client, _ := NewClient(server.URL, WithRetryConfig(RetryConfig{Enabled: false}))
 	_, err := client.Enqueue(context.Background(), "test", Args{})
 
 	var ojsErr *Error

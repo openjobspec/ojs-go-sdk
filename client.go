@@ -152,6 +152,15 @@ func (c *Client) EnqueueBatch(ctx context.Context, requests []JobRequest) ([]Job
 	if err := c.transport.post(ctx, basePath+"/jobs/batch", body, &resp); err != nil {
 		return nil, err
 	}
+
+	if resp.Count > 0 && resp.Count != len(resp.Jobs) {
+		return resp.Jobs, &BatchPartialError{
+			Submitted: len(requests),
+			Succeeded: len(resp.Jobs),
+			Jobs:      resp.Jobs,
+		}
+	}
+
 	return resp.Jobs, nil
 }
 

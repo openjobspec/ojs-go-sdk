@@ -48,6 +48,18 @@ type RateLimitInfo struct {
 	RetryAfter time.Duration
 }
 
+// BatchPartialError is returned when EnqueueBatch receives fewer jobs
+// back than were submitted, indicating some jobs in the batch failed.
+type BatchPartialError struct {
+	Submitted int   // Number of jobs submitted
+	Succeeded int   // Number of jobs successfully enqueued
+	Jobs      []Job // The successfully enqueued jobs
+}
+
+func (e *BatchPartialError) Error() string {
+	return fmt.Sprintf("ojs: batch partial failure: %d/%d jobs enqueued", e.Succeeded, e.Submitted)
+}
+
 // Error represents a structured OJS API error.
 // It supports errors.Is and errors.As for idiomatic Go error handling.
 type Error struct {
