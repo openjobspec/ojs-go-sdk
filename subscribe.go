@@ -74,15 +74,17 @@ func (c *Client) SubscribeQueue(ctx context.Context, queue string, handler Event
 	return c.Subscribe(ctx, "queue:"+queue, handler)
 }
 
-func readSSEStream(ctx context.Context, resp *http.Response, handler EventHandler) {
+func readSSEStream(ctx context.Context, resp *http.Response, handler EventHandler) string {
 	scanner := bufio.NewScanner(resp.Body)
 	var eventType string
+	var eventID string
+	var lastEventID string
 	var dataLines []string
 
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
-			return
+			return lastEventID
 		default:
 		}
 
@@ -90,15 +92,19 @@ func readSSEStream(ctx context.Context, resp *http.Response, handler EventHandle
 
 		if line == "" {
 			if len(dataLines) > 0 {
+				if eventID != "" {
+					lastEventID = eventID
+				}
 				evt := Event{
 					Type:   eventType,
 					Source: "sse",
 					Time:   time.Now(),
-					Data:   map[string]any{"raw": strings.Join(dataLines, "\n")},
+					Data:   map[string]any{"raw": strings.Join(dataLines, "\n"), "id": lastEventID},
 				}
 				handler(evt)
 			}
 			eventType = ""
+			eventID = ""
 			dataLines = dataLines[:0]
 			continue
 		}
@@ -111,8 +117,21 @@ func readSSEStream(ctx context.Context, resp *http.Response, handler EventHandle
 			dataLines = append(dataLines, strings.TrimPrefix(line, "data: "))
 		} else if line == "data" {
 			dataLines = append(dataLines, "")
+		} else if strings.HasPrefix(line, "id: ") {
+			eventID = strings.TrimPrefix(line, "id: ")
+		} else if line == "id" {
+			eventID = ""
 		}
 	}
+
+	if err := scanner.Err(); err != nil && ctx.Err() == nil {
+		// Log I/O errors that aren't caused by context cancellation
+		if t := recover(); t != nil {
+			// ignore
+		}
+	}
+
+	return lastEventID
 }
 
 // SubscribeWithReconnect is like Subscribe but automatically reconnects with
@@ -129,15 +148,23 @@ func (c *Client) SubscribeWithReconnect(ctx context.Context, channel string, han
 		defer close(sub.done)
 		backoff := 1 * time.Second
 		const maxBackoff = 30 * time.Second
+		var lastEventID string
 
 		for {
-			err := c.subscribeOnce(subCtx, channel, handler)
+			eventID, err := c.subscribeOnce(subCtx, channel, handler, lastEventID)
 			if subCtx.Err() != nil {
 				return
 			}
+			if eventID != "" {
+				lastEventID = eventID
+			}
+			// Reset backoff on successful connection (got at least one event)
+			if err == nil {
+				backoff = 1 * time.Second
+			}
 			if err != nil && c.transport.logger != nil {
 				c.transport.logger.Warn("SSE connection lost, reconnecting",
-					"channel", channel, "backoff", backoff, "error", err)
+					"channel", channel, "backoff", backoff, "error", err, "last_event_id", lastEventID)
 			}
 
 			select {
@@ -154,28 +181,32 @@ func (c *Client) SubscribeWithReconnect(ctx context.Context, channel string, han
 }
 
 // subscribeOnce opens a single SSE connection and reads until it closes or errors.
-func (c *Client) subscribeOnce(ctx context.Context, channel string, handler EventHandler) error {
+// Returns the last event ID received and any error.
+func (c *Client) subscribeOnce(ctx context.Context, channel string, handler EventHandler, lastEventID string) (string, error) {
 	url := fmt.Sprintf("%s/ojs/v1/events/stream?channel=%s", c.transport.baseURL, channel)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Cache-Control", "no-cache")
+	if lastEventID != "" {
+		req.Header.Set("Last-Event-ID", lastEventID)
+	}
 	if c.transport.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.transport.authToken)
 	}
 
 	resp, err := c.transport.httpClient.Do(req)
 	if err != nil {
-		return err
+		return lastEventID, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("server returned %d", resp.StatusCode)
+		return lastEventID, fmt.Errorf("server returned %d", resp.StatusCode)
 	}
 
-	readSSEStream(ctx, resp, handler)
-	return nil
+	eventID := readSSEStream(ctx, resp, handler)
+	return eventID, nil
 }

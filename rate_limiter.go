@@ -9,7 +9,8 @@ import (
 	"time"
 )
 
-// RetryConfig configures automatic HTTP request retries for rate-limited responses.
+// RetryConfig configures automatic HTTP request retries for rate-limited
+// and transient server error responses.
 type RetryConfig struct {
 	// MaxRetries is the maximum number of retry attempts. Default: 3.
 	MaxRetries int
@@ -22,15 +23,19 @@ type RetryConfig struct {
 
 	// Enabled controls whether automatic retry on 429 is active. Default: true.
 	Enabled bool
+
+	// RetryServerErrors enables retry on 502, 503, 504 responses. Default: true.
+	RetryServerErrors bool
 }
 
 // DefaultRetryConfig returns a RetryConfig with sensible defaults.
 func DefaultRetryConfig() RetryConfig {
 	return RetryConfig{
-		MaxRetries: 3,
-		MinBackoff: 500 * time.Millisecond,
-		MaxBackoff: 30 * time.Second,
-		Enabled:    true,
+		MaxRetries:        3,
+		MinBackoff:        500 * time.Millisecond,
+		MaxBackoff:        30 * time.Second,
+		Enabled:           true,
+		RetryServerErrors: true,
 	}
 }
 
@@ -56,9 +61,22 @@ func (rc RetryConfig) retryBackoff(attempt int, retryAfter time.Duration) time.D
 	return time.Duration(float64(backoff) * jitter)
 }
 
-// shouldRetry returns true if the response is a 429 and retries remain.
+// shouldRetry returns true if the response status code is retryable and retries remain.
+// Retryable: 429 (Too Many Requests), 502, 503, 504 (transient server errors).
 func (rc RetryConfig) shouldRetry(statusCode int, attempt int) bool {
-	return rc.Enabled && statusCode == http.StatusTooManyRequests && attempt < rc.MaxRetries
+	if !rc.Enabled || attempt >= rc.MaxRetries {
+		return false
+	}
+	if statusCode == http.StatusTooManyRequests {
+		return true
+	}
+	if rc.RetryServerErrors {
+		switch statusCode {
+		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		}
+	}
+	return false
 }
 
 // sleepWithContext sleeps for the given duration, returning early if ctx is cancelled.
@@ -78,7 +96,7 @@ func logRetry(logger *slog.Logger, attempt, maxRetries int, backoff time.Duratio
 	if logger == nil {
 		return
 	}
-	logger.Warn("ojs: retrying rate-limited request",
+	logger.Warn("ojs: retrying request",
 		slog.Int("attempt", attempt+1),
 		slog.Int("max_retries", maxRetries),
 		slog.Duration("backoff", backoff),

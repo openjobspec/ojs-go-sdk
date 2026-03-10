@@ -23,6 +23,16 @@ func NewClient(serverURL string, opts ...ClientOption) (*Client, error) {
 	if serverURL == "" {
 		return nil, fmt.Errorf("ojs: server URL is required")
 	}
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return nil, fmt.Errorf("ojs: invalid server URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("ojs: server URL scheme must be http or https, got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("ojs: server URL must include a host")
+	}
 	cfg := clientConfig{}
 	for _, opt := range opts {
 		opt(&cfg)
