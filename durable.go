@@ -144,7 +144,13 @@ func (dc *DurableContext) SideEffect(key string, fn func() (any, error)) (json.R
 
 	if dc.replaying && dc.cursor < len(dc.entries) {
 		entry := dc.entries[dc.cursor]
-		if entry.Type == "call" && (key == "" || entry.Key == key) {
+		if entry.Type == "call" {
+			// Strict key matching during replay: if both keys are set, they must match.
+			// A mismatch means the code changed between the checkpoint save and replay,
+			// which would silently return the wrong data.
+			if key != "" && entry.Key != "" && entry.Key != key {
+				return nil, fmt.Errorf("ojs: durable replay key mismatch at position %d: checkpoint has %q but code called %q — handler logic may have changed since checkpoint was saved", dc.cursor, entry.Key, key)
+			}
 			dc.cursor++
 			if dc.cursor >= len(dc.entries) {
 				dc.replaying = false

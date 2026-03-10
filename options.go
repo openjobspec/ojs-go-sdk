@@ -152,6 +152,7 @@ func (u UniquePolicy) toWire() *uniquePolicyWire {
 type clientConfig struct {
 	httpClient  *http.Client
 	authToken   string
+	userAgent   string
 	headers     map[string]string
 	retryConfig *RetryConfig
 	logger      *slog.Logger
@@ -196,6 +197,13 @@ func WithHeader(key, value string) ClientOption {
 			c.headers = make(map[string]string)
 		}
 		c.headers[key] = value
+	}
+}
+
+// WithUserAgent sets a custom User-Agent header. Default: "ojs-go-sdk/<version>".
+func WithUserAgent(ua string) ClientOption {
+	return func(c *clientConfig) {
+		c.userAgent = ua
 	}
 }
 
