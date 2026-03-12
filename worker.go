@@ -185,13 +185,18 @@ func (w *Worker) Start(ctx context.Context) error {
 	}
 	w.handlersMu.RUnlock()
 
+	// Heartbeat uses a separate context that outlives the main ctx,
+	// so heartbeats continue during the graceful drain phase.
+	heartbeatCtx, heartbeatCancel := context.WithCancel(context.Background())
+	defer heartbeatCancel()
+
 	var wg sync.WaitGroup
 
 	// Start heartbeat loop.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		w.heartbeatLoop(ctx)
+		w.heartbeatLoop(heartbeatCtx)
 	}()
 
 	// Start fetch loop.
@@ -208,6 +213,7 @@ func (w *Worker) Start(ctx context.Context) error {
 	w.state.Store(WorkerStateTerminate)
 
 	// Wait for grace period or all active jobs to complete.
+	// Heartbeats continue during this phase so the server knows we're draining.
 	graceDone := make(chan struct{})
 	go func() {
 		w.waitForActiveJobs()
@@ -218,8 +224,14 @@ func (w *Worker) Start(ctx context.Context) error {
 	case <-graceDone:
 		// All jobs completed within grace period.
 	case <-time.After(w.config.gracePeriod):
-		// Grace period expired. Active jobs will be recovered by visibility timeout.
+		// Grace period expired. Explicitly nack remaining active jobs so the
+		// server can reschedule them immediately instead of waiting for
+		// visibility timeout.
+		w.nackActiveJobs(heartbeatCtx)
 	}
+
+	// Stop heartbeats now that drain is complete or timed out.
+	heartbeatCancel()
 
 	w.stopOnce.Do(func() {
 		close(w.stopped)
@@ -372,8 +384,22 @@ func (w *Worker) processJob(ctx context.Context, job Job) {
 	// Build the middleware chain around the handler.
 	wrapped := w.middleware.then(handler)
 
-	// Execute.
-	err := wrapped(jctx)
+	// Execute with panic recovery to prevent a single handler crash from
+	// taking down the entire worker process.
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("panic in job handler: %v", r)
+				w.logError(ctx, "job handler panicked",
+					slog.String("job.id", job.ID),
+					slog.String("job.type", job.Type),
+					slog.Any("panic", r),
+				)
+			}
+		}()
+		err = wrapped(jctx)
+	}()
 
 	if err != nil {
 		// Job failed. NACK it, respecting the error's retryability signal.
@@ -530,6 +556,21 @@ func (w *Worker) getActiveJobIDs() []string {
 func (w *Worker) waitForActiveJobs() {
 	for w.activeCount.Load() > 0 {
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// nackActiveJobs nacks all currently active jobs so the server can reschedule
+// them immediately. Called when the grace period expires during shutdown.
+func (w *Worker) nackActiveJobs(ctx context.Context) {
+	ids := w.getActiveJobIDs()
+	for _, id := range ids {
+		if err := w.nackJob(ctx, id, "worker_shutdown",
+			"worker shutting down: grace period expired", true); err != nil {
+			w.logError(ctx, "failed to nack job during shutdown",
+				slog.String("job.id", id),
+				slog.String("error", err.Error()),
+			)
+		}
 	}
 }
 

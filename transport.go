@@ -17,6 +17,8 @@ import (
 const (
 	ojsContentType     = "application/openjobspec+json"
 	ojsVersion         = "1.0"
+	sdkVersion         = "0.2.0"
+	defaultUserAgent   = "ojs-go-sdk/" + sdkVersion
 	basePath           = "/ojs/v1"
 	maxResponseBodyLen = 10 << 20 // 10 MB
 )
@@ -26,6 +28,7 @@ type transport struct {
 	baseURL     string
 	httpClient  *http.Client
 	authToken   string
+	userAgent   string
 	headers     map[string]string
 	retryConfig RetryConfig
 	logger      *slog.Logger
@@ -33,10 +36,23 @@ type transport struct {
 
 const defaultHTTPTimeout = 30 * time.Second
 
+// defaultHTTPClient is a package-level HTTP client shared across all OJS
+// clients that don't provide their own. This enables connection pooling
+// and avoids creating a new transport per NewClient() call.
+var defaultHTTPClient = &http.Client{
+	Timeout: defaultHTTPTimeout,
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		MaxConnsPerHost:     50,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
 func newTransport(baseURL string, cfg clientConfig) *transport {
 	client := cfg.httpClient
 	if client == nil {
-		client = &http.Client{Timeout: defaultHTTPTimeout}
+		client = defaultHTTPClient
 	}
 	rc := DefaultRetryConfig()
 	if cfg.retryConfig != nil {
@@ -46,6 +62,7 @@ func newTransport(baseURL string, cfg clientConfig) *transport {
 		baseURL:     strings.TrimRight(baseURL, "/"),
 		httpClient:  client,
 		authToken:   cfg.authToken,
+		userAgent:   cfg.userAgent,
 		headers:     cfg.headers,
 		retryConfig: rc,
 		logger:      cfg.logger,
@@ -98,6 +115,11 @@ func (t *transport) do(ctx context.Context, method, path string, body any, resul
 		req.Header.Set("Accept", ojsContentType)
 		req.Header.Set("OJS-Version", ojsVersion)
 		req.Header.Set("X-Request-ID", generateRequestID())
+		ua := t.userAgent
+		if ua == "" {
+			ua = defaultUserAgent
+		}
+		req.Header.Set("User-Agent", ua)
 
 		if t.authToken != "" {
 			req.Header.Set("Authorization", "Bearer "+t.authToken)
@@ -115,6 +137,12 @@ func (t *transport) do(ctx context.Context, method, path string, body any, resul
 		resp.Body.Close()
 		if err != nil {
 			return fmt.Errorf("ojs: read response: %w", err)
+		}
+
+		// Detect response truncation: if we read exactly the limit, the
+		// response was likely larger and was silently truncated.
+		if int64(len(respBody)) >= maxResponseBodyLen {
+			return fmt.Errorf("ojs: response body exceeds %d bytes limit — response truncated", maxResponseBodyLen)
 		}
 
 		if t.retryConfig.shouldRetry(resp.StatusCode, attempt) {

@@ -11,7 +11,7 @@ Thank you for your interest in contributing to the OJS Go SDK.
 
 ## Development
 
-**Prerequisites:** Go 1.22+
+**Prerequisites:** Go 1.24+
 
 ```bash
 # Run tests with race detection

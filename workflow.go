@@ -88,6 +88,52 @@ func Batch(callbacks BatchCallbacks, jobs ...Step) WorkflowDefinition {
 	}
 }
 
+// MaxWorkflowSteps is the maximum number of steps allowed in a single workflow.
+const MaxWorkflowSteps = 500
+
+// Validate checks a WorkflowDefinition for common errors before sending to the server.
+func (d WorkflowDefinition) Validate() error {
+	switch d.Type {
+	case "chain":
+		if len(d.Steps) < 1 {
+			return fmt.Errorf("ojs: chain workflow requires at least 1 step")
+		}
+		if len(d.Steps) > MaxWorkflowSteps {
+			return fmt.Errorf("ojs: chain workflow exceeds maximum of %d steps (got %d)", MaxWorkflowSteps, len(d.Steps))
+		}
+		for i, s := range d.Steps {
+			if s.Type == "" {
+				return fmt.Errorf("ojs: chain step %d has empty type", i)
+			}
+		}
+	case "group":
+		if len(d.Jobs) < 2 {
+			return fmt.Errorf("ojs: group workflow requires at least 2 parallel jobs")
+		}
+		if len(d.Jobs) > MaxWorkflowSteps {
+			return fmt.Errorf("ojs: group workflow exceeds maximum of %d jobs (got %d)", MaxWorkflowSteps, len(d.Jobs))
+		}
+		for i, s := range d.Jobs {
+			if s.Type == "" {
+				return fmt.Errorf("ojs: group job %d has empty type", i)
+			}
+		}
+	case "batch":
+		if len(d.Jobs) < 1 {
+			return fmt.Errorf("ojs: batch workflow requires at least 1 job")
+		}
+		if len(d.Jobs) > MaxWorkflowSteps {
+			return fmt.Errorf("ojs: batch workflow exceeds maximum of %d jobs (got %d)", MaxWorkflowSteps, len(d.Jobs))
+		}
+		if d.Callbacks == nil || (d.Callbacks.OnComplete == nil && d.Callbacks.OnSuccess == nil && d.Callbacks.OnFailure == nil) {
+			return fmt.Errorf("ojs: batch workflow requires at least one callback (on_complete, on_success, or on_failure)")
+		}
+	default:
+		return fmt.Errorf("ojs: unknown workflow type %q (expected chain, group, or batch)", d.Type)
+	}
+	return nil
+}
+
 // Workflow represents the server response for a workflow.
 type Workflow struct {
 	ID        string        `json:"id"`
@@ -134,6 +180,10 @@ type workflowStepWire struct {
 
 // CreateWorkflow creates and starts a workflow.
 func (c *Client) CreateWorkflow(ctx context.Context, def WorkflowDefinition, opts ...EnqueueOption) (*Workflow, error) {
+	if err := def.Validate(); err != nil {
+		return nil, err
+	}
+
 	cfg := resolveEnqueueConfig(opts)
 
 	req := workflowRequest{

@@ -260,3 +260,69 @@ func TestCreateWorkflowWithOptions(t *testing.T) {
 		t.Fatalf("CreateWorkflow with options error = %v", err)
 	}
 }
+
+func TestCreateChainWorkflow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req workflowRequest
+		json.NewDecoder(r.Body).Decode(&req)
+
+		if len(req.Steps) != 3 {
+			t.Errorf("expected 3 steps, got %d", len(req.Steps))
+		}
+
+		// Chain steps should have sequential dependencies:
+		// step-0: no deps, step-1: depends on step-0, step-2: depends on step-1
+		for i, step := range req.Steps {
+			if i == 0 {
+				if len(step.DependsOn) != 0 {
+					t.Errorf("step 0 should have no deps, got %v", step.DependsOn)
+				}
+			} else {
+				expectedDep := req.Steps[i-1].ID
+				if len(step.DependsOn) != 1 || step.DependsOn[0] != expectedDep {
+					t.Errorf("step %d should depend on %q, got %v", i, expectedDep, step.DependsOn)
+				}
+			}
+		}
+
+		w.Header().Set("Content-Type", ojsContentType)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{
+			"workflow": map[string]any{
+				"id":    "wf-chain-1",
+				"state": "running",
+				"steps": []map[string]any{
+					{"id": "step-0", "type": "validate", "state": "available", "depends_on": []any{}},
+					{"id": "step-1", "type": "process", "state": "pending", "depends_on": []any{"step-0"}},
+					{"id": "step-2", "type": "notify", "state": "pending", "depends_on": []any{"step-1"}},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, _ := NewClient(server.URL)
+	wf, err := client.CreateWorkflow(context.Background(), Chain(
+		Step{Type: "validate", Args: Args{"input": "data"}},
+		Step{Type: "process", Args: Args{"mode": "fast"}},
+		Step{Type: "notify", Args: Args{"channel": "email"}},
+	))
+	if err != nil {
+		t.Fatalf("CreateWorkflow(Chain) error = %v", err)
+	}
+	if wf.ID != "wf-chain-1" {
+		t.Errorf("expected workflow ID wf-chain-1, got %s", wf.ID)
+	}
+	if len(wf.Steps) != 3 {
+		t.Errorf("expected 3 steps, got %d", len(wf.Steps))
+	}
+	// Verify step dependencies in response
+	if len(wf.Steps) >= 3 {
+		if len(wf.Steps[0].DependsOn) != 0 {
+			t.Errorf("response step 0 should have no deps")
+		}
+		if len(wf.Steps[2].DependsOn) != 1 || wf.Steps[2].DependsOn[0] != "step-1" {
+			t.Errorf("response step 2 should depend on step-1, got %v", wf.Steps[2].DependsOn)
+		}
+	}
+}

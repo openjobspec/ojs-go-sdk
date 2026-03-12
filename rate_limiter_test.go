@@ -3,6 +3,7 @@ package ojs
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -323,5 +324,118 @@ func TestRetryBackoffClampsRetryAfter(t *testing.T) {
 	b := cfg.retryBackoff(0, 60*time.Second)
 	if b != cfg.MaxBackoff {
 		t.Errorf("expected backoff clamped to MaxBackoff=%v, got %v", cfg.MaxBackoff, b)
+	}
+}
+
+func TestRetryOnServerErrors502503504(t *testing.T) {
+	for _, statusCode := range []int{502, 503, 504} {
+		t.Run(fmt.Sprintf("retries_%d", statusCode), func(t *testing.T) {
+			var attempts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				n := attempts.Add(1)
+				if n <= 2 {
+					w.WriteHeader(statusCode)
+					json.NewEncoder(w).Encode(map[string]any{
+						"error": map[string]any{
+							"code":      "backend_error",
+							"message":   fmt.Sprintf("HTTP %d", statusCode),
+							"retryable": true,
+						},
+					})
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			}))
+			defer server.Close()
+
+			cfg := DefaultRetryConfig()
+			cfg.MinBackoff = time.Millisecond
+			cfg.MaxBackoff = 5 * time.Millisecond
+
+			client, err := NewClient(server.URL, WithRetryConfig(cfg))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var result map[string]any
+			err = client.transport.do(context.Background(), http.MethodGet, "/test", nil, &result)
+			if err != nil {
+				t.Fatalf("expected success after retries, got error: %v", err)
+			}
+			if got := attempts.Load(); got != 3 {
+				t.Errorf("expected 3 attempts (2 failures + 1 success), got %d", got)
+			}
+		})
+	}
+}
+
+func TestNoRetryOnServerErrorsWhenDisabled(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"code":      "backend_error",
+				"message":   "502 Bad Gateway",
+				"retryable": true,
+			},
+		})
+	}))
+	defer server.Close()
+
+	cfg := DefaultRetryConfig()
+	cfg.RetryServerErrors = false
+	cfg.MinBackoff = time.Millisecond
+
+	client, err := NewClient(server.URL, WithRetryConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = client.transport.do(context.Background(), http.MethodGet, "/test", nil, nil)
+	if err == nil {
+		t.Fatal("expected error for 502 with RetryServerErrors=false")
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("expected exactly 1 attempt with RetryServerErrors=false, got %d", got)
+	}
+}
+
+func TestShouldRetryFunction(t *testing.T) {
+	tests := []struct {
+		name              string
+		statusCode        int
+		retryServerErrors bool
+		attempt           int
+		maxRetries        int
+		expected          bool
+	}{
+		{"429 retried", 429, true, 0, 3, true},
+		{"502 retried when enabled", 502, true, 0, 3, true},
+		{"503 retried when enabled", 503, true, 0, 3, true},
+		{"504 retried when enabled", 504, true, 0, 3, true},
+		{"502 not retried when disabled", 502, false, 0, 3, false},
+		{"500 never retried", 500, true, 0, 3, false},
+		{"501 never retried", 501, true, 0, 3, false},
+		{"429 not retried at max attempts", 429, true, 3, 3, false},
+		{"200 not retried", 200, true, 0, 3, false},
+		{"400 not retried", 400, true, 0, 3, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := RetryConfig{
+				MaxRetries:        tt.maxRetries,
+				Enabled:           true,
+				RetryServerErrors: tt.retryServerErrors,
+			}
+			got := cfg.shouldRetry(tt.statusCode, tt.attempt)
+			if got != tt.expected {
+				t.Errorf("shouldRetry(%d, attempt=%d, serverErrors=%v) = %v, want %v",
+					tt.statusCode, tt.attempt, tt.retryServerErrors, got, tt.expected)
+			}
+		})
 	}
 }
