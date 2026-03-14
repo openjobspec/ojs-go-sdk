@@ -52,7 +52,16 @@ var defaultHTTPClient = &http.Client{
 func newTransport(baseURL string, cfg clientConfig) *transport {
 	client := cfg.httpClient
 	if client == nil {
-		client = defaultHTTPClient
+		if cfg.httpTimeout > 0 {
+			client = &http.Client{
+				Timeout:   cfg.httpTimeout,
+				Transport: defaultHTTPClient.Transport,
+			}
+		} else if cfg.httpTimeout == 0 && cfg.httpTimeoutSet {
+			client = &http.Client{Transport: defaultHTTPClient.Transport} // No timeout
+		} else {
+			client = defaultHTTPClient
+		}
 	}
 	rc := DefaultRetryConfig()
 	if cfg.retryConfig != nil {

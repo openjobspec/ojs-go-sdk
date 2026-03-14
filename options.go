@@ -150,16 +150,27 @@ func (u UniquePolicy) toWire() *uniquePolicyWire {
 
 // clientConfig holds the resolved configuration for a Client.
 type clientConfig struct {
-	httpClient  *http.Client
-	authToken   string
-	userAgent   string
-	headers     map[string]string
-	retryConfig *RetryConfig
-	logger      *slog.Logger
+	httpClient     *http.Client
+	authToken      string
+	userAgent      string
+	headers        map[string]string
+	retryConfig    *RetryConfig
+	logger         *slog.Logger
+	httpTimeout    time.Duration
+	httpTimeoutSet bool
 }
 
 // ClientOption configures the OJS client.
 type ClientOption func(*clientConfig)
+
+// WithHTTPTimeout sets the HTTP client timeout for all requests.
+// Default is 30 seconds. Set to 0 for no timeout.
+func WithHTTPTimeout(d time.Duration) ClientOption {
+	return func(c *clientConfig) {
+		c.httpTimeout = d
+		c.httpTimeoutSet = true
+	}
+}
 
 // WithHTTPClient sets a custom net/http.Client for the OJS client.
 func WithHTTPClient(client *http.Client) ClientOption {

@@ -16,6 +16,7 @@ import (
 // idempotent re-execution after crashes.
 type DurableContext struct {
 	mu        sync.Mutex
+	parent    context.Context
 	transport *transport
 	jobID     string
 	attempt   int
@@ -38,8 +39,11 @@ type checkpointState struct {
 }
 
 // newDurableContext creates a DurableContext, loading any existing checkpoint.
-func newDurableContext(transport *transport, jobID string, attempt int) *DurableContext {
+// The parent context is used for checkpoint operations to ensure cancellation
+// and distributed tracing propagate correctly.
+func newDurableContext(parent context.Context, transport *transport, jobID string, attempt int) *DurableContext {
 	dc := &DurableContext{
+		parent:    parent,
 		transport: transport,
 		jobID:     jobID,
 		attempt:   attempt,
@@ -53,7 +57,7 @@ func newDurableContext(transport *transport, jobID string, attempt int) *Durable
 		} `json:"checkpoint,omitempty"`
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 
 	err := transport.get(ctx, fmt.Sprintf("%s/checkpoints/%s/resume", basePath, jobID), &resp)
@@ -208,7 +212,7 @@ func (dc *DurableContext) Checkpoint(stepIndex int, state any) error {
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(dc.parent, 5*time.Second)
 	defer cancel()
 
 	return dc.transport.do(ctx, "PUT",
@@ -217,7 +221,7 @@ func (dc *DurableContext) Checkpoint(stepIndex int, state any) error {
 
 // Complete clears the checkpoint after successful job completion.
 func (dc *DurableContext) Complete() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(dc.parent, 5*time.Second)
 	defer cancel()
 	return dc.transport.delete(ctx,
 		fmt.Sprintf("%s/checkpoints/%s", basePath, dc.jobID), nil)
@@ -267,7 +271,7 @@ type DurableHandlerFunc func(ctx JobContext, dc *DurableContext) error
 //	})
 func (w *Worker) RegisterDurable(jobType string, handler DurableHandlerFunc) {
 	w.Register(jobType, func(ctx JobContext) error {
-		dc := newDurableContext(w.transport, ctx.Job.ID, ctx.Attempt)
+		dc := newDurableContext(ctx.Context(), w.transport, ctx.Job.ID, ctx.Attempt)
 		return handler(ctx, dc)
 	})
 }

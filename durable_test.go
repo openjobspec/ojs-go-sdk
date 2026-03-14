@@ -1,6 +1,7 @@
 package ojs
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,7 +18,7 @@ func TestDurableContextNow(t *testing.T) {
 	defer srv.Close()
 
 	tp := newTransport(srv.URL, clientConfig{})
-	dc := newDurableContext(tp, "job-1", 1)
+	dc := newDurableContext(context.Background(), tp, "job-1", 1)
 
 	t1 := dc.Now()
 	if t1.IsZero() {
@@ -38,7 +39,7 @@ func TestDurableContextRandom(t *testing.T) {
 	defer srv.Close()
 
 	tp := newTransport(srv.URL, clientConfig{})
-	dc := newDurableContext(tp, "job-2", 1)
+	dc := newDurableContext(context.Background(), tp, "job-2", 1)
 
 	r := dc.Random(16)
 	if len(r) != 32 { // hex doubles bytes
@@ -53,7 +54,7 @@ func TestDurableContextSideEffect(t *testing.T) {
 	defer srv.Close()
 
 	tp := newTransport(srv.URL, clientConfig{})
-	dc := newDurableContext(tp, "job-3", 1)
+	dc := newDurableContext(context.Background(), tp, "job-3", 1)
 
 	var callCount int32
 	result, err := dc.SideEffect("compute", func() (any, error) {
@@ -81,7 +82,7 @@ func TestDurableContextSideEffectError(t *testing.T) {
 	defer srv.Close()
 
 	tp := newTransport(srv.URL, clientConfig{})
-	dc := newDurableContext(tp, "job-4", 1)
+	dc := newDurableContext(context.Background(), tp, "job-4", 1)
 
 	_, err := dc.SideEffect("fail", func() (any, error) {
 		return nil, fmt.Errorf("external API error")
@@ -113,7 +114,7 @@ func TestDurableContextReplayFromCheckpoint(t *testing.T) {
 	defer srv.Close()
 
 	tp := newTransport(srv.URL, clientConfig{})
-	dc := newDurableContext(tp, "job-replay", 2)
+	dc := newDurableContext(context.Background(), tp, "job-replay", 2)
 
 	if !dc.IsReplaying() {
 		t.Fatal("expected to be in replay mode")
@@ -169,7 +170,7 @@ func TestDurableContextCheckpoint(t *testing.T) {
 	defer srv.Close()
 
 	tp := newTransport(srv.URL, clientConfig{})
-	dc := newDurableContext(tp, "job-cp", 1)
+	dc := newDurableContext(context.Background(), tp, "job-cp", 1)
 
 	dc.Now()
 	dc.Random(8)
@@ -196,7 +197,7 @@ func TestDurableContextComplete(t *testing.T) {
 	defer srv.Close()
 
 	tp := newTransport(srv.URL, clientConfig{})
-	dc := newDurableContext(tp, "job-complete", 1)
+	dc := newDurableContext(context.Background(), tp, "job-complete", 1)
 
 	err := dc.Complete()
 	if err != nil {
@@ -236,7 +237,7 @@ func TestDurableContextNoCheckpointServer(t *testing.T) {
 	defer srv.Close()
 
 	tp := newTransport(srv.URL, clientConfig{})
-	dc := newDurableContext(tp, "job-no-cp", 1)
+	dc := newDurableContext(context.Background(), tp, "job-no-cp", 1)
 
 	// Should work in record mode even without checkpoint server
 	if dc.IsReplaying() {
