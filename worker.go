@@ -403,8 +403,8 @@ func (w *Worker) processJob(ctx context.Context, job Job) {
 
 	if err != nil {
 		// Job failed. NACK it, respecting the error's retryability signal.
-		if nackErr := w.nackJob(ctx, job.ID, "handler_error", err.Error(), isHandlerRetryable(err)); nackErr != nil {
-			w.logError(ctx, "failed to nack job",
+		if nackErr := w.nackJobWithRetry(ctx, job.ID, "handler_error", err.Error(), isHandlerRetryable(err)); nackErr != nil {
+			w.logError(ctx, "failed to nack job after retries",
 				slog.String("job.id", job.ID),
 				slog.String("job.type", job.Type),
 				slog.String("error", nackErr.Error()),
@@ -414,8 +414,8 @@ func (w *Worker) processJob(ctx context.Context, job Job) {
 	}
 
 	// Job succeeded. ACK it.
-	if ackErr := w.ackJob(ctx, job.ID, ref.data); ackErr != nil {
-		w.logError(ctx, "failed to ack job",
+	if ackErr := w.ackJobWithRetry(ctx, job.ID, ref.data); ackErr != nil {
+		w.logError(ctx, "failed to ack job after retries",
 			slog.String("job.id", job.ID),
 			slog.String("job.type", job.Type),
 			slog.String("error", ackErr.Error()),
@@ -486,7 +486,12 @@ func (w *Worker) heartbeatLoop(ctx context.Context) {
 		case <-w.stopped:
 			return
 		case <-ticker.C:
-			_ = w.sendHeartbeat(ctx)
+			if err := w.sendHeartbeat(ctx); err != nil {
+				w.logWarn(ctx, "heartbeat failed",
+					slog.String("worker.id", w.workerID),
+					slog.String("error", err.Error()),
+				)
+			}
 		}
 	}
 }
@@ -592,4 +597,52 @@ func (w *Worker) logWarn(ctx context.Context, msg string, attrs ...slog.Attr) {
 	if w.config.logger != nil {
 		w.config.logger.LogAttrs(ctx, slog.LevelWarn, msg, attrs...)
 	}
+}
+
+const ackNackMaxRetries = 3
+
+// ackJobWithRetry retries ACK up to ackNackMaxRetries times with brief pauses.
+func (w *Worker) ackJobWithRetry(ctx context.Context, jobID string, result map[string]any) error {
+	var lastErr error
+	for attempt := 0; attempt < ackNackMaxRetries; attempt++ {
+		if err := w.ackJob(ctx, jobID, result); err != nil {
+			lastErr = err
+			w.logWarn(ctx, "ack attempt failed, retrying",
+				slog.String("job.id", jobID),
+				slog.Int("attempt", attempt+1),
+				slog.String("error", err.Error()),
+			)
+			select {
+			case <-ctx.Done():
+				return lastErr
+			case <-time.After(time.Duration(attempt+1) * 500 * time.Millisecond):
+			}
+			continue
+		}
+		return nil
+	}
+	return lastErr
+}
+
+// nackJobWithRetry retries NACK up to ackNackMaxRetries times with brief pauses.
+func (w *Worker) nackJobWithRetry(ctx context.Context, jobID, code, message string, retryable bool) error {
+	var lastErr error
+	for attempt := 0; attempt < ackNackMaxRetries; attempt++ {
+		if err := w.nackJob(ctx, jobID, code, message, retryable); err != nil {
+			lastErr = err
+			w.logWarn(ctx, "nack attempt failed, retrying",
+				slog.String("job.id", jobID),
+				slog.Int("attempt", attempt+1),
+				slog.String("error", err.Error()),
+			)
+			select {
+			case <-ctx.Done():
+				return lastErr
+			case <-time.After(time.Duration(attempt+1) * 500 * time.Millisecond):
+			}
+			continue
+		}
+		return nil
+	}
+	return lastErr
 }

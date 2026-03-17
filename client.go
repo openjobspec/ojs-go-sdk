@@ -176,6 +176,9 @@ func (c *Client) EnqueueBatch(ctx context.Context, requests []JobRequest) ([]Job
 
 // GetJob retrieves the full details of a job by ID.
 func (c *Client) GetJob(ctx context.Context, id string) (*Job, error) {
+	if id == "" {
+		return nil, fmt.Errorf("ojs: job ID is required")
+	}
 	var resp jobResponse
 	path := fmt.Sprintf("%s/jobs/%s", basePath, url.PathEscape(id))
 	if err := c.transport.get(ctx, path, &resp); err != nil {
@@ -186,6 +189,9 @@ func (c *Client) GetJob(ctx context.Context, id string) (*Job, error) {
 
 // CancelJob cancels a job, preventing it from being processed.
 func (c *Client) CancelJob(ctx context.Context, id string) (*Job, error) {
+	if id == "" {
+		return nil, fmt.Errorf("ojs: job ID is required")
+	}
 	var resp jobResponse
 	path := fmt.Sprintf("%s/jobs/%s", basePath, url.PathEscape(id))
 	if err := c.transport.delete(ctx, path, &resp); err != nil {
@@ -271,6 +277,9 @@ func (c *Client) ListDeadLetterJobs(ctx context.Context, queue string, limit, of
 
 // RetryDeadLetterJob re-enqueues a dead letter job for another attempt.
 func (c *Client) RetryDeadLetterJob(ctx context.Context, id string) (*Job, error) {
+	if id == "" {
+		return nil, fmt.Errorf("ojs: job ID is required")
+	}
 	var resp jobResponse
 	path := fmt.Sprintf("%s/dead-letter/%s/retry", basePath, url.PathEscape(id))
 	if err := c.transport.post(ctx, path, nil, &resp); err != nil {
@@ -281,6 +290,9 @@ func (c *Client) RetryDeadLetterJob(ctx context.Context, id string) (*Job, error
 
 // DiscardDeadLetterJob permanently removes a dead letter job.
 func (c *Client) DiscardDeadLetterJob(ctx context.Context, id string) error {
+	if id == "" {
+		return fmt.Errorf("ojs: job ID is required")
+	}
 	path := fmt.Sprintf("%s/dead-letter/%s", basePath, url.PathEscape(id))
 	return c.transport.delete(ctx, path, nil)
 }
@@ -358,6 +370,9 @@ func (c *Client) RegisterCronJob(ctx context.Context, req CronJobRequest) (*Cron
 
 // UnregisterCronJob removes a cron job schedule by name.
 func (c *Client) UnregisterCronJob(ctx context.Context, name string) error {
+	if name == "" {
+		return fmt.Errorf("ojs: cron job name is required")
+	}
 	path := fmt.Sprintf("%s/cron/%s", basePath, url.PathEscape(name))
 	return c.transport.delete(ctx, path, nil)
 }

@@ -193,6 +193,58 @@ func AssertPerformed(t *testing.T, jobType string, opts ...MatchOption) {
 	}
 }
 
+// AssertCompleted asserts that at least one job of the given type completed successfully.
+func AssertCompleted(t *testing.T, jobType string, opts ...MatchOption) {
+	t.Helper()
+	s := mustStore(t)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	criteria := buildCriteria(opts)
+	matches := filterJobs(s.performed, jobType, criteria)
+
+	var completed int
+	for _, j := range matches {
+		if j.State == "completed" {
+			completed++
+		}
+	}
+
+	if completed == 0 {
+		states := make([]string, 0, len(matches))
+		for _, j := range matches {
+			states = append(states, j.State)
+		}
+		t.Errorf("AssertCompleted: expected at least one completed job of type %q, got states %v", jobType, states)
+	}
+}
+
+// AssertFailed asserts that at least one job of the given type failed (state = "discarded").
+func AssertFailed(t *testing.T, jobType string, opts ...MatchOption) {
+	t.Helper()
+	s := mustStore(t)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	criteria := buildCriteria(opts)
+	matches := filterJobs(s.performed, jobType, criteria)
+
+	var failed int
+	for _, j := range matches {
+		if j.State == "discarded" {
+			failed++
+		}
+	}
+
+	if failed == 0 {
+		states := make([]string, 0, len(matches))
+		for _, j := range matches {
+			states = append(states, j.State)
+		}
+		t.Errorf("AssertFailed: expected at least one failed job of type %q, got states %v", jobType, states)
+	}
+}
+
 // AllEnqueued returns all enqueued jobs, optionally filtered by type.
 func AllEnqueued(jobType ...string) []FakeJob {
 	storeMu.Lock()
