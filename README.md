@@ -1,4 +1,5 @@
 # ojs-go-sdk
+[![Stability: stable](https://img.shields.io/badge/stability-stable-brightgreen.svg)](https://github.com/openjobspec/openjobspec/blob/main/STABILITY.md)
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/openjobspec/ojs-go-sdk.svg)](https://pkg.go.dev/github.com/openjobspec/ojs-go-sdk)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/openjobspec/ojs-go-sdk)](https://go.dev/)
