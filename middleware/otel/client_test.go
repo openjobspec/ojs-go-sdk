@@ -80,4 +80,3 @@ func TestTracingWithPropagation_NoContext(t *testing.T) {
 		t.Errorf("unexpected span name: %s", spans[0].Name)
 	}
 }
-

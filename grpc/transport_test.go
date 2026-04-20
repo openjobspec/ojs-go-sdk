@@ -76,4 +76,3 @@ func TestEnqueueOpts(t *testing.T) {
 		t.Errorf("expected 2 tags, got %d", len(o.Tags))
 	}
 }
-

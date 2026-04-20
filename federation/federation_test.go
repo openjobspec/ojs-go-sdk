@@ -174,7 +174,7 @@ func TestCircuitBreaker_TransitionsToHalfOpen(t *testing.T) {
 	fc, _ := New(
 		WithRegion(RegionConfig{ID: "r1", URL: "http://localhost:1"}),
 		WithFailureThreshold(2),
-		WithCooldownPeriod(10 * time.Millisecond),
+		WithCooldownPeriod(10*time.Millisecond),
 	)
 
 	rs := fc.regions["r1"]

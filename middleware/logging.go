@@ -43,4 +43,3 @@ func Logging(logger *slog.Logger) ojs.MiddlewareFunc {
 		return err
 	}
 }
-

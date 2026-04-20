@@ -154,4 +154,3 @@ func LookupByCanonicalCode(canonical string) *ErrorCodeEntry {
 	}
 	return nil
 }
-
