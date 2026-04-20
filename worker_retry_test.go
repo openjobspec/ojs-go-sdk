@@ -105,7 +105,7 @@ func TestNackJobWithRetry_Success(t *testing.T) {
 	defer server.Close()
 
 	w := NewWorker(server.URL)
-	err := w.nackJobWithRetry(context.Background(), "job-1", "handler_error", "some error", true)
+	err := w.nackHandlerErrorWithRetry(context.Background(), "job-1", "some error", true)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -129,7 +129,7 @@ func TestNackJobWithRetry_RetriesOnFailure(t *testing.T) {
 	defer server.Close()
 
 	w := NewWorker(server.URL)
-	err := w.nackJobWithRetry(context.Background(), "job-1", "handler_error", "fail", true)
+	err := w.nackHandlerErrorWithRetry(context.Background(), "job-1", "fail", true)
 	if err != nil {
 		t.Fatalf("expected success after retry, got %v", err)
 	}
