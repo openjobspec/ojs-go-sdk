@@ -28,6 +28,11 @@ func (s JobState) IsTerminal() bool {
 // Args represents the arguments for a job as a key-value map.
 // On the OJS wire format, args are serialized as a JSON array
 // containing a single object: [{"key": "value", ...}].
+//
+// Only that exact shape — an array of exactly one object — maps to Args. Any
+// other array is positional and is preserved verbatim in [Job.RawArgs]; Args
+// then holds an index-keyed view of it that is a convenience, not the source of
+// truth.
 type Args map[string]any
 
 // Job represents an OJS job envelope.
@@ -60,6 +65,10 @@ type Job struct {
 
 	// RawArgs preserves the original wire-format array for cases where
 	// positional arguments are used instead of a single-object map.
+	//
+	// It is authoritative for every args array except the canonical
+	// single-object form, so a job decoded from the wire re-encodes to exactly
+	// the bytes it arrived as.
 	RawArgs []any `json:"-"`
 
 	// PreviousState is set on cancel responses.
@@ -68,28 +77,28 @@ type Job struct {
 
 // jobJSON is an alias used for custom JSON marshaling/unmarshaling.
 type jobJSON struct {
-	ID            string         `json:"id"`
-	Type          string         `json:"type"`
-	State         JobState       `json:"state"`
-	Queue         string         `json:"queue"`
-	Priority      int            `json:"priority"`
-	Attempt       int            `json:"attempt"`
-	MaxAttempts   int            `json:"max_attempts"`
-	TimeoutMS     int            `json:"timeout_ms,omitempty"`
-	Tags          []string       `json:"tags,omitempty"`
-	Meta          map[string]any `json:"meta,omitempty"`
-	Result        map[string]any `json:"result,omitempty"`
-	Error         *JobError      `json:"error,omitempty"`
-	CreatedAt     *time.Time     `json:"created_at,omitempty"`
-	EnqueuedAt    *time.Time     `json:"enqueued_at,omitempty"`
-	StartedAt     *time.Time     `json:"started_at,omitempty"`
-	CompletedAt   *time.Time     `json:"completed_at,omitempty"`
-	CancelledAt   *time.Time     `json:"cancelled_at,omitempty"`
-	DiscardedAt   *time.Time     `json:"discarded_at,omitempty"`
-	ScheduledAt   *time.Time     `json:"scheduled_at,omitempty"`
-	ExpiresAt     *time.Time     `json:"expires_at,omitempty"`
+	ID            string          `json:"id"`
+	Type          string          `json:"type"`
+	State         JobState        `json:"state"`
+	Queue         string          `json:"queue"`
+	Priority      int             `json:"priority"`
+	Attempt       int             `json:"attempt"`
+	MaxAttempts   int             `json:"max_attempts"`
+	TimeoutMS     int             `json:"timeout_ms,omitempty"`
+	Tags          []string        `json:"tags,omitempty"`
+	Meta          map[string]any  `json:"meta,omitempty"`
+	Result        map[string]any  `json:"result,omitempty"`
+	Error         *JobError       `json:"error,omitempty"`
+	CreatedAt     *time.Time      `json:"created_at,omitempty"`
+	EnqueuedAt    *time.Time      `json:"enqueued_at,omitempty"`
+	StartedAt     *time.Time      `json:"started_at,omitempty"`
+	CompletedAt   *time.Time      `json:"completed_at,omitempty"`
+	CancelledAt   *time.Time      `json:"cancelled_at,omitempty"`
+	DiscardedAt   *time.Time      `json:"discarded_at,omitempty"`
+	ScheduledAt   *time.Time      `json:"scheduled_at,omitempty"`
+	ExpiresAt     *time.Time      `json:"expires_at,omitempty"`
 	Args          json.RawMessage `json:"args,omitempty"`
-	PreviousState string         `json:"previous_state,omitempty"`
+	PreviousState string          `json:"previous_state,omitempty"`
 }
 
 // MarshalJSON implements custom JSON marshaling for Job.
@@ -117,7 +126,7 @@ func (j Job) MarshalJSON() ([]byte, error) {
 		ExpiresAt:     j.ExpiresAt,
 		PreviousState: j.PreviousState,
 	}
-	argsBytes, err := json.Marshal(argsToWire(j.Args))
+	argsBytes, err := json.Marshal(j.wireArgs())
 	if err != nil {
 		return nil, fmt.Errorf("ojs: failed to marshal job args: %w", err)
 	}
@@ -155,12 +164,59 @@ func (j *Job) UnmarshalJSON(data []byte) error {
 
 	if len(raw.Args) > 0 {
 		var arr []any
-		if err := json.Unmarshal(raw.Args, &arr); err == nil {
-			j.RawArgs = arr
-			j.Args = argsFromWire(arr)
+		if err := json.Unmarshal(raw.Args, &arr); err != nil {
+			return fmt.Errorf("ojs: job %q has malformed args (OJS requires a JSON array): %w", j.ID, err)
 		}
+		j.RawArgs = arr
+		j.Args = argsFromWire(arr)
 	}
 	return nil
+}
+
+// wireArgs returns the OJS wire representation of this job's arguments.
+//
+// When the job was decoded from positional arguments, RawArgs holds the only
+// faithful representation: Args is a synthetic index->value map, and round
+// tripping through it would rewrite [1,2,3] as [{"0":1,"1":2,"2":3}]. In that
+// case the original array is emitted unchanged. Args in the canonical
+// single-object form aliases RawArgs[0], so Args stays authoritative there and
+// caller mutations are kept.
+func (j Job) wireArgs() []any {
+	if isPositionalWireArgs(j.RawArgs) {
+		return j.RawArgs
+	}
+	// A decoded empty object (`[{}]`, one argument) is not the same wire value
+	// as no arguments at all (`[]`), and an empty Args map cannot tell the two
+	// apart. RawArgs can, so it decides this case.
+	if len(j.Args) == 0 && len(j.RawArgs) > 0 {
+		return j.RawArgs
+	}
+	return argsToWire(j.Args)
+}
+
+// isPositionalWireArgs reports whether raw is anything other than the canonical
+// single-object args form.
+//
+// A leading object is not enough. `[{"a":1}, 2, 3]` used to be treated as the
+// object form, which meant Args captured only the first element and re-encoding
+// through it silently dropped everything after it. Only an array of exactly one
+// object round-trips through Args; every other array is emitted verbatim.
+func isPositionalWireArgs(raw []any) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	_, canonical := canonicalObjectArgs(raw)
+	return !canonical
+}
+
+// canonicalObjectArgs returns the object of the OJS canonical args form — an
+// array holding exactly one JSON object — and whether raw is in that form.
+func canonicalObjectArgs(raw []any) (map[string]any, bool) {
+	if len(raw) != 1 {
+		return nil, false
+	}
+	m, ok := raw[0].(map[string]any)
+	return m, ok
 }
 
 // JobError represents a structured error associated with a job.
@@ -180,22 +236,27 @@ type JobRequest struct {
 
 // argsToWire converts Args (map) to the OJS wire format (JSON array).
 func argsToWire(a Args) []any {
-	if a == nil || len(a) == 0 {
+	if len(a) == 0 {
 		return []any{}
 	}
 	return []any{map[string]any(a)}
 }
 
 // argsFromWire converts the OJS wire format (JSON array) to Args (map).
+//
+// Only the canonical single-object array becomes the map form and aliases the
+// decoded object. Every other array — including one that merely *starts* with
+// an object — is indexed by position, because collapsing it into its first
+// element would discard the remaining arguments the moment the job is
+// re-encoded. Those jobs keep RawArgs as their authoritative representation.
 func argsFromWire(raw []any) Args {
 	if len(raw) == 0 {
 		return Args{}
 	}
-	// If the first element is a map, use it directly as Args.
-	if m, ok := raw[0].(map[string]any); ok {
+	if m, ok := canonicalObjectArgs(raw); ok {
 		return Args(m)
 	}
-	// Fallback for positional args: index them by position.
+	// Positional args: index them by position.
 	result := make(Args, len(raw))
 	for i, v := range raw {
 		result[fmt.Sprintf("%d", i)] = v
