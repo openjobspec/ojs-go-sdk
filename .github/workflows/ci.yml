@@ -12,25 +12,75 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        go-version: ['1.22', '1.23', '1.24']
+    env:
+      GOWORK: "off"
+      GOFLAGS: "-mod=readonly"
+      GOPROXY: file://${{ github.workspace }}/.release-proxy/proto,file://${{ github.workspace }}/.release-proxy/sdk,https://proxy.golang.org,direct
+      GONOSUMDB: github.com/openjobspec/*
+      OJS_PROTO_PRE_RELEASE_SHA: 966a023140e51f20a98277485a553b8e80c2e6f0
+      FOUNDATION_READ_TOKEN: ${{ secrets.FOUNDATION_READ_TOKEN }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
+      - name: Require immutable pre-release dependency
+        run: |
+          if ! printf '%s' "$OJS_PROTO_PRE_RELEASE_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::Set OJS_PROTO_PRE_RELEASE_SHA to the immutable ojs-proto 0.5.0 foundation commit"
+            exit 1
+          fi
+          if [ -z "$FOUNDATION_READ_TOKEN" ]; then
+            echo "::error::FOUNDATION_READ_TOKEN is required to check out pre-release foundation repositories"
+            exit 1
+          fi
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          repository: openjobspec/ojs-proto
+          ref: ${{ env.OJS_PROTO_PRE_RELEASE_SHA }}
+          token: ${{ env.FOUNDATION_READ_TOKEN }}
+          path: .release-deps/ojs-proto
+
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: "1.24.x"
+          cache-dependency-path: |
+            go.sum
+            grpc/go.sum
+            middleware/otel/go.sum
 
-      - name: Vet
-        run: go vet ./...
+      - name: Build clean pre-release module proxies
+        run: |
+          python3 scripts/build-local-proxy.py \
+            --module-root .release-deps/ojs-proto .release-proxy/proto v0.5.0
+          python3 scripts/build-local-proxy.py \
+            --module-root . .release-proxy/sdk v0.5.0
 
-      - name: Test
-        run: go test ./... -race -coverprofile=coverage.out
+      - name: Verify SDK module zip matches committed checksum
+        run: |
+          mkdir -p .release-proxy/drift-mod-cache .release-proxy/drift-go-cache .release-proxy/drift-go-tmp
+          (
+            cd middleware/otel
+            GOMODCACHE="$GITHUB_WORKSPACE/.release-proxy/drift-mod-cache" \
+            GOCACHE="$GITHUB_WORKSPACE/.release-proxy/drift-go-cache" \
+            GOTMPDIR="$GITHUB_WORKSPACE/.release-proxy/drift-go-tmp" \
+            go mod download github.com/openjobspec/ojs-go-sdk@v0.5.0
+          )
+
+      - name: Verify modules are tidy
+        run: make tidy-check
+
+      - name: Build standalone modules
+        run: make build-all
+
+      - name: Test standalone modules
+        run: make test-all
+
+      - name: Lint standalone modules
+        run: make lint-all
 
       - name: Coverage
-        if: matrix.go-version == '1.24'
         run: |
+          GOWORK=off go test ./... -race -coverprofile=coverage.out
           go tool cover -func=coverage.out
           COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
           echo "Total coverage: ${COVERAGE}%"
@@ -39,14 +89,7 @@ jobs:
             exit 1
           fi
 
-      - name: golangci-lint
-        if: matrix.go-version == '1.24'
-        uses: golangci/golangci-lint-action@55c2c1448f86e01eaae002a5a3a9624417608d84 # v6
-        with:
-          version: v1.64.8
-
       - name: Govulncheck
-        if: matrix.go-version == '1.24'
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           govulncheck ./...
