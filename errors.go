@@ -160,10 +160,7 @@ func IsRetryable(err error) bool {
 // Handler errors default to retryable unless explicitly wrapped with NonRetryable.
 func isHandlerRetryable(err error) bool {
 	var nr *nonRetryableError
-	if errors.As(err, &nr) {
-		return false
-	}
-	return true
+	return !errors.As(err, &nr)
 }
 
 // nonRetryableError wraps an error to mark it as non-retryable.
