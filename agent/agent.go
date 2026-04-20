@@ -130,7 +130,9 @@ func WithHTTPClient(hc *http.Client) Option {
 // AgentClient is a thin HTTP client for the OJS Agent API.
 type AgentClient struct {
 	baseURL    string
-	httpClient interface{ Do(req *http.Request) (*http.Response, error) }
+	httpClient interface {
+		Do(req *http.Request) (*http.Response, error)
+	}
 }
 
 // NewAgentClient creates a new AgentClient pointed at the given base URL.
@@ -161,8 +163,8 @@ func NewAgentClient(baseURL string, opts ...Option) (*AgentClient, error) {
 // turn specified in opts.
 func (c *AgentClient) Fork(ctx context.Context, jobID string, opts ForkOptions) (*ForkResult, error) {
 	var res ForkResult
-	path := fmt.Sprintf("/v1/agent/jobs/%s/fork", jobID)
-	if err := c.doJSON(ctx, http.MethodPost, path, opts, &res); err != nil {
+	path := fmt.Sprintf("/v1/agent/jobs/%s/fork", url.PathEscape(jobID))
+	if err := c.postJSON(ctx, path, opts, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -173,8 +175,8 @@ func (c *AgentClient) Fork(ctx context.Context, jobID string, opts ForkOptions) 
 // automatic resolution was not possible for every turn.
 func (c *AgentClient) Merge(ctx context.Context, jobID string, opts MergeOptions) (*MergeResult, error) {
 	var res MergeResult
-	path := fmt.Sprintf("/v1/agent/jobs/%s/merge", jobID)
-	if err := c.doJSON(ctx, http.MethodPost, path, opts, &res); err != nil {
+	path := fmt.Sprintf("/v1/agent/jobs/%s/merge", url.PathEscape(jobID))
+	if err := c.postJSON(ctx, path, opts, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -186,32 +188,35 @@ func (c *AgentClient) Pause(ctx context.Context, jobID string, reason string) er
 	body := struct {
 		Reason string `json:"reason"`
 	}{Reason: reason}
-	path := fmt.Sprintf("/v1/agent/jobs/%s/pause", jobID)
-	return c.doJSON(ctx, http.MethodPost, path, body, nil)
+	path := fmt.Sprintf("/v1/agent/jobs/%s/pause", url.PathEscape(jobID))
+	return c.postJSON(ctx, path, body, nil)
 }
 
 // Resume instructs a paused agent to continue (or abort) execution based on
 // the provided ResumeDecision.
 func (c *AgentClient) Resume(ctx context.Context, jobID string, decision ResumeDecision) error {
-	path := fmt.Sprintf("/v1/agent/jobs/%s/resume", jobID)
-	return c.doJSON(ctx, http.MethodPost, path, decision, nil)
+	path := fmt.Sprintf("/v1/agent/jobs/%s/resume", url.PathEscape(jobID))
+	return c.postJSON(ctx, path, decision, nil)
 }
 
 // Replay re-executes the given job deterministically starting from the turn
 // specified in opts, optionally substituting mock providers for live ones.
 func (c *AgentClient) Replay(ctx context.Context, jobID string, opts ReplayOptions) (*ReplayResult, error) {
 	var res ReplayResult
-	path := fmt.Sprintf("/v1/agent/jobs/%s/replay", jobID)
-	if err := c.doJSON(ctx, http.MethodPost, path, opts, &res); err != nil {
+	path := fmt.Sprintf("/v1/agent/jobs/%s/replay", url.PathEscape(jobID))
+	if err := c.postJSON(ctx, path, opts, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
 }
 
-// doJSON is an internal helper that marshals body to JSON, sends the request,
-// and decodes the response into result. It maps well-known HTTP status codes
-// to sentinel errors.
-func (c *AgentClient) doJSON(ctx context.Context, method, path string, body, result any) error {
+// postJSON marshals body to JSON, POSTs it to path, and decodes the response
+// into result. It maps well-known HTTP status codes to sentinel errors.
+//
+// Every Agent API operation is a POST — fork, merge, pause, resume, and replay
+// are all state transitions — so the method is not a parameter: making it one
+// implied a generality that does not exist and that no caller ever exercised.
+func (c *AgentClient) postJSON(ctx context.Context, path string, body, result any) error {
 	var reqBody bytes.Buffer
 	if body != nil {
 		if err := json.NewEncoder(&reqBody).Encode(body); err != nil {
@@ -219,7 +224,7 @@ func (c *AgentClient) doJSON(ctx context.Context, method, path string, body, res
 		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, &reqBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, &reqBody)
 	if err != nil {
 		return fmt.Errorf("ojs: failed to create request: %w", err)
 	}
