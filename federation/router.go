@@ -3,7 +3,6 @@ package federation
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"sort"
 	"sync/atomic"
 )
@@ -43,7 +42,10 @@ func (r *OverflowRouter) Select(_ context.Context, regions map[string]*regionSta
 		return "", ErrNoHealthyRegions
 	}
 
-	pick := rand.Intn(totalWeight)
+	pick, err := randIntn(totalWeight)
+	if err != nil {
+		return "", err
+	}
 	for id, rs := range regions {
 		pick -= rs.config.Weight
 		if pick < 0 {
