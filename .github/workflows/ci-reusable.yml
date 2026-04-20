@@ -14,8 +14,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go-version: ['1.22', '1.24']
-    uses: openjobspec/.github/.github/workflows/ci-go.yml@main
+        go-version: ['1.24']
+    uses: openjobspec/.github/.github/workflows/ci-go.yml@baf3b6896d4578c5586ef692daf7958f8e9a2d8a
     with:
       go-version: ${{ matrix.go-version }}
       working-directory: .
