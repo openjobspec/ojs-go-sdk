@@ -2,6 +2,7 @@ package ojs
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"time"
@@ -45,40 +46,112 @@ func NewClient(serverURL string, opts ...ClientOption) (*Client, error) {
 // --- Wire format types for requests ---
 
 type enqueueRequest struct {
-	Type    string       `json:"type"`
-	Args    []any        `json:"args"`
+	Type    string         `json:"type"`
+	Args    []any          `json:"args"`
 	Meta    map[string]any `json:"meta,omitempty"`
-	Schema  string       `json:"schema,omitempty"`
-	Options *wireOptions `json:"options,omitempty"`
+	Schema  string         `json:"schema,omitempty"`
+	Options *wireOptions   `json:"options,omitempty"`
 }
 
 type wireOptions struct {
-	Queue              string           `json:"queue,omitempty"`
-	Priority           int              `json:"priority,omitempty"`
-	TimeoutMS          int              `json:"timeout_ms,omitempty"`
-	DelayUntil         *time.Time       `json:"delay_until,omitempty"`
-	ExpiresAt          *time.Time       `json:"expires_at,omitempty"`
-	Retry              *retryPolicyWire `json:"retry,omitempty"`
-	Unique             *uniquePolicyWire `json:"unique,omitempty"`
-	Tags               []string         `json:"tags,omitempty"`
-	VisibilityTimeoutMS int             `json:"visibility_timeout_ms,omitempty"`
+	Queue               string            `json:"queue,omitempty"`
+	Priority            int               `json:"-"`
+	TimeoutMS           int               `json:"-"`
+	DelayUntil          *time.Time        `json:"delay_until,omitempty"`
+	ExpiresAt           *time.Time        `json:"expires_at,omitempty"`
+	Retry               *retryPolicyWire  `json:"retry,omitempty"`
+	Unique              *uniquePolicyWire `json:"unique,omitempty"`
+	Tags                []string          `json:"tags,omitempty"`
+	VisibilityTimeoutMS int               `json:"visibility_timeout_ms,omitempty"`
+	Metadata            map[string]any    `json:"metadata,omitempty"`
+
+	prioritySet bool
+	timeoutSet  bool
+}
+
+func (o wireOptions) MarshalJSON() ([]byte, error) {
+	type wireOptionsAlias wireOptions
+	type wireOptionsJSON struct {
+		wireOptionsAlias
+		Priority  *int `json:"priority,omitempty"`
+		TimeoutMS *int `json:"timeout_ms,omitempty"`
+	}
+
+	var priority *int
+	if o.prioritySet {
+		priority = &o.Priority
+	}
+	var timeoutMS *int
+	if o.timeoutSet {
+		timeoutMS = &o.TimeoutMS
+	}
+	return json.Marshal(wireOptionsJSON{
+		wireOptionsAlias: wireOptionsAlias(o),
+		Priority:         priority,
+		TimeoutMS:        timeoutMS,
+	})
+}
+
+func (o *wireOptions) UnmarshalJSON(data []byte) error {
+	type wireOptionsAlias wireOptions
+	type wireOptionsJSON struct {
+		wireOptionsAlias
+		Priority  *int `json:"priority"`
+		TimeoutMS *int `json:"timeout_ms"`
+	}
+
+	var decoded wireOptionsJSON
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*o = wireOptions(decoded.wireOptionsAlias)
+	if decoded.Priority != nil {
+		o.Priority = *decoded.Priority
+		o.prioritySet = true
+	}
+	if decoded.TimeoutMS != nil {
+		o.TimeoutMS = *decoded.TimeoutMS
+		o.timeoutSet = true
+	}
+	return nil
 }
 
 func buildWireOptions(cfg enqueueConfig) *wireOptions {
 	opts := &wireOptions{
-		Queue:     cfg.queue,
-		Priority:  cfg.priority,
-		TimeoutMS: cfg.timeoutMS,
-		DelayUntil: cfg.delayUntil,
-		ExpiresAt:  cfg.expiresAt,
-		Tags:       cfg.tags,
+		Priority:            cfg.priority,
+		TimeoutMS:           cfg.timeoutMS,
+		timeoutSet:          cfg.timeoutSet,
+		DelayUntil:          cfg.delayUntil,
+		ExpiresAt:           cfg.expiresAt,
+		Tags:                cfg.tags,
 		VisibilityTimeoutMS: cfg.visibilityTimeout,
+		prioritySet:         cfg.prioritySet,
+	}
+	// Queue is only put on the wire when the caller actually configured it.
+	// enqueueConfig always resolves an unset queue to the sentinel "default"
+	// so validation and routing have a concrete value to work with, but
+	// transmitting that sentinel unconditionally would let it silently beat a
+	// workflow-level default queue for a step that never mentioned a queue at
+	// all (see mergeWorkflowStepOptions in workflow_wire.go).
+	if cfg.queueSet {
+		opts.Queue = cfg.queue
 	}
 	if cfg.retry != nil {
 		opts.Retry = cfg.retry.toWire()
 	}
 	if cfg.unique != nil {
 		opts.Unique = cfg.unique.toWire()
+	}
+	return opts
+}
+
+// buildWireOptionsWithMetadata builds workflow job options with metadata under
+// options.metadata. Keeping the source map here lets the outer JSON encoder
+// surface unsupported metadata values instead of silently dropping them.
+func buildWireOptionsWithMetadata(cfg enqueueConfig) *wireOptions {
+	opts := buildWireOptions(cfg)
+	if len(cfg.meta) > 0 {
+		opts.Metadata = cfg.meta
 	}
 	return opts
 }
@@ -316,12 +389,12 @@ type CronJob struct {
 
 // CronJobRequest defines a new cron schedule.
 type CronJobRequest struct {
-	Name     string         `json:"name"`
-	Cron     string         `json:"cron"`
-	Timezone string         `json:"timezone,omitempty"`
-	Type     string         `json:"type"`
-	Args     Args           `json:"-"`
-	Meta     map[string]any `json:"meta,omitempty"`
+	Name     string          `json:"name"`
+	Cron     string          `json:"cron"`
+	Timezone string          `json:"timezone,omitempty"`
+	Type     string          `json:"type"`
+	Args     Args            `json:"-"`
+	Meta     map[string]any  `json:"meta,omitempty"`
 	Options  []EnqueueOption `json:"-"`
 }
 

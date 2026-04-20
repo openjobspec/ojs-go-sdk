@@ -10,9 +10,13 @@ import (
 
 // enqueueConfig holds the resolved configuration for an enqueue operation.
 type enqueueConfig struct {
-	queue             string
-	priority          int
+	queue       string
+	queueSet    bool // true once WithQueue has run, even if set to "default"
+	priority    int
+	prioritySet bool // true once WithPriority has run, including WithPriority(0)
+
 	timeoutMS         int
+	timeoutSet        bool // true once WithTimeout has run, including WithTimeout(0)
 	delayUntil        *time.Time
 	expiresAt         *time.Time
 	retry             *RetryPolicy
@@ -29,6 +33,7 @@ type EnqueueOption func(*enqueueConfig)
 func WithQueue(queue string) EnqueueOption {
 	return func(c *enqueueConfig) {
 		c.queue = queue
+		c.queueSet = true
 	}
 }
 
@@ -36,6 +41,7 @@ func WithQueue(queue string) EnqueueOption {
 func WithPriority(priority int) EnqueueOption {
 	return func(c *enqueueConfig) {
 		c.priority = priority
+		c.prioritySet = true
 	}
 }
 
@@ -43,6 +49,7 @@ func WithPriority(priority int) EnqueueOption {
 func WithTimeout(d time.Duration) EnqueueOption {
 	return func(c *enqueueConfig) {
 		c.timeoutMS = int(d.Milliseconds())
+		c.timeoutSet = true
 	}
 }
 
@@ -116,6 +123,35 @@ func resolveEnqueueConfig(opts []EnqueueOption) enqueueConfig {
 		opt(&cfg)
 	}
 	return cfg
+}
+
+// hasOverrides reports whether any enqueue option actually changed the config
+// away from its defaults. This includes both option-level overrides and
+// metadata, since metadata is encoded under options.metadata per the shared
+// HTTP binding.
+func (c enqueueConfig) hasOverrides() bool {
+	return c.hasOptionOverrides() || len(c.meta) > 0
+}
+
+// hasOptionOverrides reports whether anything belonging in the wire `options`
+// object was set, excluding metadata.
+//
+// queueSet -- rather than comparing c.queue to the literal string "default" --
+// is what decides whether the queue was configured: a caller that explicitly
+// calls WithQueue("default") to override an inherited non-default (e.g. a
+// workflow-level default queue of "gpu" for one step that must run on the
+// plain default queue) has still made an override, even though the resulting
+// value is indistinguishable from having never called WithQueue at all.
+func (c enqueueConfig) hasOptionOverrides() bool {
+	return c.queueSet ||
+		c.prioritySet ||
+		c.timeoutSet ||
+		c.delayUntil != nil ||
+		c.expiresAt != nil ||
+		c.retry != nil ||
+		c.unique != nil ||
+		len(c.tags) > 0 ||
+		c.visibilityTimeout != 0
 }
 
 // UniquePolicy defines the deduplication policy for a job.
