@@ -6,6 +6,7 @@ package ojsgrpc
 import (
 	"context"
 	"fmt"
+	"math"
 
 	ojsv1 "github.com/openjobspec/ojs-proto/gen/go/ojs/v1"
 	"google.golang.org/grpc"
@@ -157,6 +158,9 @@ func (t *Transport) Health(ctx context.Context) (*ojsv1.HealthResponse, error) {
 
 // Fetch requests jobs from the server for processing.
 func (t *Transport) Fetch(ctx context.Context, queues []string, count int, workerID string) ([]*ojsv1.Job, error) {
+	if count < 0 || count > math.MaxInt32 {
+		return nil, fmt.Errorf("ojsgrpc: fetch count %d out of range", count)
+	}
 	resp, err := t.client.Fetch(t.ctx(ctx), &ojsv1.FetchRequest{
 		Queues:   queues,
 		Count:    int32(count),
@@ -172,10 +176,13 @@ func (t *Transport) Fetch(ctx context.Context, queues []string, count int, worke
 func (t *Transport) Ack(ctx context.Context, jobID string, result map[string]any) error {
 	req := &ojsv1.AckRequest{JobId: jobID}
 	if result != nil {
+		// Report an unencodable result instead of ACKing the job with no
+		// result at all, which silently discarded the handler's output.
 		s, err := structpb.NewStruct(result)
-		if err == nil {
-			req.Result = s
+		if err != nil {
+			return fmt.Errorf("ojsgrpc: marshal ack result for job %s: %w", jobID, err)
 		}
+		req.Result = s
 	}
 	_, err := t.client.Ack(t.ctx(ctx), req)
 	return err
