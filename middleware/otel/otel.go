@@ -62,10 +62,12 @@ func Tracing(opts ...Option) ojs.MiddlewareFunc {
 			trace.WithSpanKind(trace.SpanKindConsumer),
 			trace.WithAttributes(jobAttributes(ctx)...),
 		)
-		_ = spanCtx // span carries its own context; JobContext.ctx is not reassignable
 		defer span.End()
 
-		err := next(ctx)
+		// Hand the span context down to the handler so spans it creates are
+		// children of the job span. Previously the span context was discarded,
+		// which orphaned every span started inside a job handler.
+		err := next(ctx.WithContext(spanCtx))
 
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
