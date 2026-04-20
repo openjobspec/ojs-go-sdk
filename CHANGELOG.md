@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-20
+
 ### Added
 - `NonRetryable(err)` error wrapper — handlers can signal non-retryable failures
 - `isHandlerRetryable` internal helper for worker NACK retryability decisions
