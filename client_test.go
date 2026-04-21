@@ -47,44 +47,7 @@ func TestNewClientWithOptions(t *testing.T) {
 
 func TestEnqueue(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Errorf("expected POST, got %s", r.Method)
-		}
-		if r.URL.Path != "/ojs/v1/jobs" {
-			t.Errorf("expected /ojs/v1/jobs, got %s", r.URL.Path)
-		}
-
-		ct := r.Header.Get("Content-Type")
-		if ct != ojsContentType {
-			t.Errorf("expected content type %s, got %s", ojsContentType, ct)
-		}
-
-		version := r.Header.Get("OJS-Version")
-		if version != ojsVersion {
-			t.Errorf("expected OJS-Version %s, got %s", ojsVersion, version)
-		}
-
-		// Verify request body.
-		var req enqueueRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
-		if req.Type != "email.send" {
-			t.Errorf("expected type email.send, got %s", req.Type)
-		}
-		if len(req.Args) != 1 {
-			t.Fatalf("expected 1 arg, got %d", len(req.Args))
-		}
-		argMap, ok := req.Args[0].(map[string]any)
-		if !ok {
-			t.Fatal("expected args[0] to be a map")
-		}
-		if argMap["to"] != "user@example.com" {
-			t.Errorf("expected to=user@example.com, got %v", argMap["to"])
-		}
-		if req.Options.Queue != "email" {
-			t.Errorf("expected queue=email, got %s", req.Options.Queue)
-		}
+		assertEnqueueWireRequest(t, r)
 
 		w.Header().Set("Content-Type", ojsContentType)
 		w.WriteHeader(http.StatusCreated)
@@ -97,7 +60,7 @@ func TestEnqueue(t *testing.T) {
 				"queue":        "email",
 				"priority":     0,
 				"attempt":      0,
-				"max_attempts":  5,
+				"max_attempts": 5,
 				"created_at":   "2026-02-12T10:30:00.000Z",
 				"enqueued_at":  "2026-02-12T10:30:00.123Z",
 			},
@@ -129,6 +92,56 @@ func TestEnqueue(t *testing.T) {
 	}
 	if job.Args["to"] != "user@example.com" {
 		t.Errorf("expected args.to=user@example.com, got %v", job.Args["to"])
+	}
+}
+
+// assertEnqueueWireRequest checks that the SDK put a spec-conforming OJS enqueue
+// request on the wire: verb, path, content negotiation headers, and the body
+// fields the caller supplied.
+//
+// It runs on the test server's goroutine, so every failure is reported with
+// Errorf and an early return. t.Fatal is not valid outside the goroutine that
+// called the test function: it would end the server goroutine instead of the
+// test, hanging the client on a request that is never answered.
+func assertEnqueueWireRequest(t *testing.T, r *http.Request) {
+	t.Helper()
+
+	if r.Method != http.MethodPost {
+		t.Errorf("expected POST, got %s", r.Method)
+	}
+	if r.URL.Path != "/ojs/v1/jobs" {
+		t.Errorf("expected /ojs/v1/jobs, got %s", r.URL.Path)
+	}
+	if ct := r.Header.Get("Content-Type"); ct != ojsContentType {
+		t.Errorf("expected content type %s, got %s", ojsContentType, ct)
+	}
+	if version := r.Header.Get("OJS-Version"); version != ojsVersion {
+		t.Errorf("expected OJS-Version %s, got %s", ojsVersion, version)
+	}
+
+	var req enqueueRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		t.Errorf("decode request: %v", err)
+		return
+	}
+	if req.Type != "email.send" {
+		t.Errorf("expected type email.send, got %s", req.Type)
+	}
+	if req.Options.Queue != "email" {
+		t.Errorf("expected queue=email, got %s", req.Options.Queue)
+	}
+
+	if len(req.Args) != 1 {
+		t.Errorf("expected 1 arg, got %d", len(req.Args))
+		return
+	}
+	argMap, ok := req.Args[0].(map[string]any)
+	if !ok {
+		t.Errorf("expected args[0] to be a map, got %T", req.Args[0])
+		return
+	}
+	if argMap["to"] != "user@example.com" {
+		t.Errorf("expected to=user@example.com, got %v", argMap["to"])
 	}
 }
 
