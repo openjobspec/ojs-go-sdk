@@ -686,11 +686,25 @@ func TestPropertyMiddlewareCanModifyContext(t *testing.T) {
 func TestPropertyValidJobTypesAlwaysAccepted(t *testing.T) {
 	validTypes := []string{
 		"email.send", "data.export", "a", "a.b.c.d",
-		"my-job", "my_job", "a1.b2.c3",
+		"my_job", "a1.b2.c3",
 	}
 	for _, jt := range validTypes {
 		if err := validateEnqueueParams(jt, []any{}); err != nil {
 			t.Errorf("valid type %q rejected: %v", jt, err)
+		}
+	}
+}
+
+// TestPropertyHyphenatedJobTypesAlwaysRejected locks the spec rule that each
+// job-type segment matches [a-z][a-z0-9_]*. Hyphens are NOT permitted: see
+// spec/spec/ojs-core.md ("Each segment MUST match the pattern `[a-z][a-z0-9_]*`")
+// and the negative conformance fixture
+// ojs-json-schema/tests/invalid/22-type-with-hyphens.json.
+func TestPropertyHyphenatedJobTypesAlwaysRejected(t *testing.T) {
+	invalidTypes := []string{"my-job", "email.send-now", "-leading", "trailing-"}
+	for _, jt := range invalidTypes {
+		if err := validateEnqueueParams(jt, []any{}); err == nil {
+			t.Errorf("hyphenated type %q accepted, want rejection per OJS core spec", jt)
 		}
 	}
 }
