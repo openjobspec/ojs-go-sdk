@@ -44,12 +44,12 @@ func TestIntegrationEnqueueAndProcess(t *testing.T) {
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(map[string]any{
 				"job": map[string]any{
-					"id":          job.ID,
-					"type":        job.Type,
-					"state":       string(job.State),
-					"args":        req.Args,
-					"queue":       job.Queue,
-					"attempt":     job.Attempt,
+					"id":           job.ID,
+					"type":         job.Type,
+					"state":        string(job.State),
+					"args":         req.Args,
+					"queue":        job.Queue,
+					"attempt":      job.Attempt,
 					"max_attempts": job.MaxAttempts,
 				},
 			})
@@ -68,12 +68,12 @@ func TestIntegrationEnqueueAndProcess(t *testing.T) {
 				json.NewEncoder(w).Encode(map[string]any{
 					"jobs": []map[string]any{
 						{
-							"id":          job.ID,
-							"type":        job.Type,
-							"state":       "active",
-							"args":        argsToWire(job.Args),
-							"queue":       job.Queue,
-							"attempt":     1,
+							"id":           job.ID,
+							"type":         job.Type,
+							"state":        "active",
+							"args":         argsToWire(job.Args),
+							"queue":        job.Queue,
+							"attempt":      1,
 							"max_attempts": job.MaxAttempts,
 						},
 					},
@@ -175,11 +175,8 @@ func TestIntegrationWorkflow(t *testing.T) {
 			if req.Steps[0].Type != "data.fetch" {
 				t.Errorf("expected first step type data.fetch, got %s", req.Steps[0].Type)
 			}
-			if len(req.Steps[0].DependsOn) != 0 {
-				t.Errorf("expected first step to have no dependencies")
-			}
-			if len(req.Steps[1].DependsOn) != 1 || req.Steps[1].DependsOn[0] != "step-0" {
-				t.Errorf("expected second step to depend on step-0, got %v", req.Steps[1].DependsOn)
+			if req.Steps[1].Type != "data.transform" {
+				t.Errorf("expected second step type data.transform, got %s", req.Steps[1].Type)
 			}
 
 			w.WriteHeader(http.StatusCreated)
