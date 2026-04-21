@@ -27,6 +27,7 @@ package main
 
 import (
     "context"
+    "os"
     "time"
 
     "github.com/aws/aws-lambda-go/lambda"
@@ -37,6 +38,7 @@ import (
 var handler = serverless.NewLambdaHandler(
     serverless.WithOJSURL("https://ojs.example.com"),
     serverless.WithTimeout(25*time.Second), // leave 5s margin for Lambda's 30s timeout
+    serverless.WithPushSigningSecrets(os.Getenv("OJS_PUSH_SIGNING_SECRET")),
 )
 
 func init() {
@@ -77,6 +79,7 @@ package main
 import (
     "context"
     "net/http"
+    "os"
     "time"
 
     "github.com/openjobspec/ojs-go-sdk/serverless"
@@ -85,6 +88,7 @@ import (
 var handler = serverless.NewCloudflareHandler(
     serverless.WithCloudflareOJSURL("https://ojs.example.com"),
     serverless.WithCloudflareTimeout(25*time.Second),
+    serverless.WithCloudflarePushSigningSecrets(os.Getenv("OJS_PUSH_SIGNING_SECRET")),
 )
 
 func init() {
@@ -111,6 +115,7 @@ package handler
 import (
     "context"
     "net/http"
+    "os"
     "time"
 
     "github.com/openjobspec/ojs-go-sdk/serverless"
@@ -119,6 +124,7 @@ import (
 var h = serverless.NewVercelHandler(
     serverless.WithVercelOJSURL("https://ojs.example.com"),
     serverless.WithVercelTimeout(10*time.Second),
+    serverless.WithVercelPushSigningSecrets(os.Getenv("OJS_PUSH_SIGNING_SECRET")),
 )
 
 func init() {
@@ -145,6 +151,47 @@ All adapters accept platform-specific options:
 | `WithMaxBodySize` / `WithCloudflareMaxBodySize` / `WithVercelMaxBodySize` | 1 MB | Maximum HTTP request body size. |
 | `WithOJSURL` / `WithCloudflareOJSURL` / `WithVercelOJSURL` | (empty) | OJS server URL for callbacks. |
 | `WithLogger` / `WithCloudflareLogger` / `WithVercelLogger` | `slog.Default()` | Structured logger. |
+| `WithPushSigningSecrets` / platform equivalent | none | One or more OJS push HMAC secrets. Multiple values support rotation. |
+| `WithPushFreshnessWindow` / platform equivalent | 5m | Maximum permitted past or future timestamp skew. |
+
+Shared authentication settings can also be supplied with `HandlerOptions` via
+`WithHandlerOptions`, `WithCloudflareHandlerOptions`, or
+`WithVercelHandlerOptions`.
+
+## Push Authentication
+
+HTTP push endpoints fail closed unless at least one signing secret is
+configured. Direct invocation and SQS processing are unaffected.
+
+OJS signs the exact raw request bytes with:
+
+```text
+HMAC-SHA256(secret, X-OJS-Timestamp + "." + raw_body)
+```
+
+The request must provide a Unix-seconds `X-OJS-Timestamp` and an
+`X-OJS-Signature` value in `sha256=<hex>` form. Multiple comma-separated
+signatures and multiple configured secrets are accepted during rotation. The
+timestamp must be within five minutes of the handler clock unless a different
+freshness window is configured.
+
+Read the secret from the deployment platform's secret manager or environment
+and pass it explicitly:
+
+```go
+handler := serverless.NewLambdaHandler(
+    serverless.WithPushSigningSecrets(
+        os.Getenv("OJS_PUSH_SIGNING_SECRET_CURRENT"),
+        os.Getenv("OJS_PUSH_SIGNING_SECRET_PREVIOUS"),
+    ),
+)
+```
+
+Empty secrets are ignored, so a missing environment variable leaves the
+endpoint safely unavailable. Unsigned requests can be accepted only by
+explicitly selecting
+`WithInsecureAllowUnsignedPushForLocalDevelopment` (or its platform-specific
+equivalent); never use that option in a deployed environment.
 
 ## Cold Start Considerations
 
@@ -185,6 +232,10 @@ handler.Register("long.job", func(ctx context.Context, job serverless.JobEvent) 
 
 All adapters distinguish between:
 
+- **Missing server authentication configuration** → HTTP 503
+- **Invalid, stale, future, or missing signatures** → HTTP 401
+- **Oversized authentication headers** → HTTP 431
+- **Oversized request bodies** → HTTP 413
 - **Invalid requests** (bad JSON, missing fields) → HTTP 400
 - **No handler registered** → returned as a retryable failure
 - **Handler errors** → returned as a retryable failure (HTTP 200 with error body)
@@ -195,4 +246,3 @@ For SQS, the Lambda adapter returns partial batch failures (`SQSBatchResponse`) 
 ## SAM Template
 
 See `template/template.yaml` for a ready-to-use AWS SAM template that deploys a Lambda function with SQS event source mapping and dead letter queue.
-
