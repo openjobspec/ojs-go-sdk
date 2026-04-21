@@ -105,7 +105,7 @@ func TestHandleSQS_InvalidJSON(t *testing.T) {
 }
 
 func TestHandleHTTP_Success(t *testing.T) {
-	h := NewLambdaHandler()
+	h := newInsecureLambdaHandler()
 	h.Register("email.send", func(ctx context.Context, job JobEvent) error {
 		return nil
 	})
@@ -132,7 +132,7 @@ func TestHandleHTTP_Success(t *testing.T) {
 }
 
 func TestHandleHTTP_HandlerError(t *testing.T) {
-	h := NewLambdaHandler()
+	h := newInsecureLambdaHandler()
 	// No handler registered
 
 	body := `{"job":{"id":"job-1","type":"unknown.type","queue":"default","args":[],"attempt":1},"worker_id":"w1","delivery_id":"d1"}`
@@ -205,7 +205,7 @@ func TestHandleSQS_EmptyRecords(t *testing.T) {
 }
 
 func TestHandleHTTP_MissingJobFields(t *testing.T) {
-	h := NewLambdaHandler()
+	h := newInsecureLambdaHandler()
 
 	// Job with empty type
 	body := `{"job":{"id":"job-1","queue":"default","args":[],"attempt":1},"worker_id":"w1","delivery_id":"d1"}`
@@ -374,7 +374,7 @@ func TestLambdaHandler_WithOptions(t *testing.T) {
 }
 
 func TestHandleHTTP_BodyTooLarge(t *testing.T) {
-	h := NewLambdaHandler(WithMaxBodySize(10)) // very small limit
+	h := newInsecureLambdaHandler(WithMaxBodySize(10)) // very small limit
 	h.Register("email.send", func(_ context.Context, _ JobEvent) error {
 		return nil
 	})
@@ -386,7 +386,7 @@ func TestHandleHTTP_BodyTooLarge(t *testing.T) {
 
 	h.HandleHTTP().ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected status 400 for oversized body, got %d", w.Code)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected status 413 for oversized body, got %d", w.Code)
 	}
 }

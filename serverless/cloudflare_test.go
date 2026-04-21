@@ -12,7 +12,7 @@ import (
 )
 
 func TestCloudflareHandler_ServeHTTP_Success(t *testing.T) {
-	h := NewCloudflareHandler()
+	h := newInsecureCloudflareHandler()
 	h.Register("email.send", func(_ context.Context, job JobEvent) error {
 		return nil
 	})
@@ -50,7 +50,7 @@ func TestCloudflareHandler_ServeHTTP_MethodNotAllowed(t *testing.T) {
 }
 
 func TestCloudflareHandler_HandleFetchEvent_Success(t *testing.T) {
-	h := NewCloudflareHandler()
+	h := newInsecureCloudflareHandler()
 	h.Register("image.resize", func(_ context.Context, job JobEvent) error {
 		if job.ID != "job-42" {
 			return fmt.Errorf("unexpected job ID: %s", job.ID)
@@ -79,7 +79,7 @@ func TestCloudflareHandler_HandleFetchEvent_Success(t *testing.T) {
 }
 
 func TestCloudflareHandler_HandleFetchEvent_NoHandler(t *testing.T) {
-	h := NewCloudflareHandler()
+	h := newInsecureCloudflareHandler()
 
 	body := `{"id":"job-1","type":"unknown.type","queue":"default","args":[],"attempt":1}`
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
@@ -104,7 +104,7 @@ func TestCloudflareHandler_HandleFetchEvent_NoHandler(t *testing.T) {
 }
 
 func TestCloudflareHandler_HandleFetchEvent_InvalidJSON(t *testing.T) {
-	h := NewCloudflareHandler()
+	h := newInsecureCloudflareHandler()
 
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{broken`))
 	w := httptest.NewRecorder()
@@ -183,7 +183,7 @@ func TestCloudflareHandler_WithOptions(t *testing.T) {
 
 func TestCloudflareHandler_WithTimeoutOption(t *testing.T) {
 	h := NewCloudflareHandler(
-		WithCloudflareTimeout(5 * time.Second),
+		WithCloudflareTimeout(5*time.Second),
 		WithCloudflareMaxBodySize(2048),
 	)
 
@@ -196,7 +196,7 @@ func TestCloudflareHandler_WithTimeoutOption(t *testing.T) {
 }
 
 func TestCloudflareHandler_HandleFetchEvent_MissingJobFields(t *testing.T) {
-	h := NewCloudflareHandler()
+	h := newInsecureCloudflareHandler()
 
 	body := `{"id":"job-1","queue":"default","args":[],"attempt":1}`
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
@@ -218,7 +218,7 @@ func TestCloudflareHandler_HandleFetchEvent_MissingJobFields(t *testing.T) {
 }
 
 func TestCloudflareHandler_HandleFetchEvent_Timeout(t *testing.T) {
-	h := NewCloudflareHandler(
+	h := newInsecureCloudflareHandler(
 		WithCloudflareTimeout(50 * time.Millisecond),
 	)
 	h.Register("slow.job", func(ctx context.Context, _ JobEvent) error {
@@ -253,7 +253,7 @@ func TestCloudflareHandler_HandleFetchEvent_Timeout(t *testing.T) {
 }
 
 func TestCloudflareHandler_ServeHTTP_MissingJobFields(t *testing.T) {
-	h := NewCloudflareHandler()
+	h := newInsecureCloudflareHandler()
 
 	body := `{"job":{"id":"job-1","queue":"default","args":[],"attempt":1},"worker_id":"w1","delivery_id":"d1"}`
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
@@ -265,4 +265,3 @@ func TestCloudflareHandler_ServeHTTP_MissingJobFields(t *testing.T) {
 		t.Errorf("expected status 400, got %d", w.Code)
 	}
 }
-
