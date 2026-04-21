@@ -1,6 +1,7 @@
 package encryption
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -23,7 +24,7 @@ func TestEncryptDecrypt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
-	if string(ciphertext) == string(plaintext) {
+	if bytes.Equal(ciphertext, plaintext) {
 		t.Error("ciphertext should differ from plaintext")
 	}
 
@@ -31,7 +32,7 @@ func TestEncryptDecrypt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decrypt: %v", err)
 	}
-	if string(decrypted) != string(plaintext) {
+	if !bytes.Equal(decrypted, plaintext) {
 		t.Errorf("decrypted mismatch: %s", decrypted)
 	}
 }
