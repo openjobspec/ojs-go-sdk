@@ -19,8 +19,10 @@
 package ojstesting
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -155,11 +157,11 @@ func AssertEnqueued(t *testing.T, jobType string, opts ...MatchOption) {
 	if criteria.count > 0 {
 		if len(matches) != criteria.count {
 			t.Errorf("AssertEnqueued: expected %d job(s) of type %q, found %d%s",
-				criteria.count, jobType, len(matches), describeStore(s.enqueued, jobType))
+				criteria.count, jobType, len(matches), describeStore(s.enqueued))
 		}
 	} else if len(matches) == 0 {
 		t.Errorf("AssertEnqueued: expected at least one job of type %q, found none%s",
-			jobType, describeStore(s.enqueued, jobType))
+			jobType, describeStore(s.enqueued))
 	}
 }
 
@@ -196,53 +198,51 @@ func AssertPerformed(t *testing.T, jobType string, opts ...MatchOption) {
 // AssertCompleted asserts that at least one job of the given type completed successfully.
 func AssertCompleted(t *testing.T, jobType string, opts ...MatchOption) {
 	t.Helper()
-	s := mustStore(t)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	criteria := buildCriteria(opts)
-	matches := filterJobs(s.performed, jobType, criteria)
-
-	var completed int
-	for _, j := range matches {
-		if j.State == "completed" {
-			completed++
-		}
-	}
-
-	if completed == 0 {
-		states := make([]string, 0, len(matches))
-		for _, j := range matches {
-			states = append(states, j.State)
-		}
-		t.Errorf("AssertCompleted: expected at least one completed job of type %q, got states %v", jobType, states)
-	}
+	assertPerformedInState(t, "AssertCompleted", "completed", jobType, "completed", opts)
 }
 
 // AssertFailed asserts that at least one job of the given type failed (state = "discarded").
 func AssertFailed(t *testing.T, jobType string, opts ...MatchOption) {
 	t.Helper()
+	assertPerformedInState(t, "AssertFailed", "failed", jobType, "discarded", opts)
+}
+
+// assertPerformedInState asserts that at least one performed job of jobType
+// reached wantState.
+//
+// AssertCompleted and AssertFailed differ only in the state they look for and
+// the word they use for it, so the search and the "here is what actually
+// happened" diagnostic live in one place. label is the human word for
+// wantState; assertion is the caller's name, which prefixes the failure.
+func assertPerformedInState(t *testing.T, assertion, label, jobType, wantState string, opts []MatchOption) {
+	t.Helper()
 	s := mustStore(t)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	criteria := buildCriteria(opts)
-	matches := filterJobs(s.performed, jobType, criteria)
-
-	var failed int
-	for _, j := range matches {
-		if j.State == "discarded" {
-			failed++
-		}
+	states, found := statesOfPerformed(s.performed, jobType, wantState, buildCriteria(opts))
+	if found {
+		return
 	}
+	t.Errorf("%s: expected at least one %s job of type %q, got states %v",
+		assertion, label, jobType, states)
+}
 
-	if failed == 0 {
-		states := make([]string, 0, len(matches))
-		for _, j := range matches {
-			states = append(states, j.State)
+// statesOfPerformed reports whether any job matching jobType and the criteria
+// reached wantState, together with the states that were observed instead.
+//
+// Deciding is separated from reporting so the search itself is testable without
+// a failing assertion: the states slice is exactly what the diagnostic prints.
+func statesOfPerformed(jobs []FakeJob, jobType, wantState string, c matchCriteria) (states []string, found bool) {
+	matches := filterJobs(jobs, jobType, c)
+	states = make([]string, 0, len(matches))
+	for i := range matches {
+		if matches[i].State == wantState {
+			return nil, true
 		}
-		t.Errorf("AssertFailed: expected at least one failed job of type %q, got states %v", jobType, states)
+		states = append(states, matches[i].State)
 	}
+	return states, false
 }
 
 // AllEnqueued returns all enqueued jobs, optionally filtered by type.
@@ -264,9 +264,9 @@ func AllEnqueued(jobType ...string) []FakeJob {
 	}
 
 	var result []FakeJob
-	for _, j := range s.enqueued {
-		if j.Type == jobType[0] {
-			result = append(result, j)
+	for i := range s.enqueued {
+		if s.enqueued[i].Type == jobType[0] {
+			result = append(result, s.enqueued[i])
 		}
 	}
 	return result
@@ -335,30 +335,36 @@ func buildCriteria(opts []MatchOption) matchCriteria {
 
 func filterJobs(jobs []FakeJob, jobType string, c matchCriteria) []FakeJob {
 	var result []FakeJob
-	for _, j := range jobs {
-		if j.Type != jobType {
-			continue
+	for i := range jobs {
+		if c.matches(&jobs[i], jobType) {
+			result = append(result, jobs[i])
 		}
-		if c.queue != "" && j.Queue != c.queue {
-			continue
-		}
-		if c.args != nil && !jsonEqual(j.Args, c.args) {
-			continue
-		}
-		if c.meta != nil {
-			if !metaContains(j.Meta, c.meta) {
-				continue
-			}
-		}
-		result = append(result, j)
 	}
 	return result
+}
+
+// matches reports whether job satisfies the job type and every criterion that
+// was actually set. An unset criterion matches everything, so the zero
+// matchCriteria selects purely by type.
+func (c matchCriteria) matches(job *FakeJob, jobType string) bool {
+	switch {
+	case job.Type != jobType:
+		return false
+	case c.queue != "" && job.Queue != c.queue:
+		return false
+	case c.args != nil && !jsonEqual(job.Args, c.args):
+		return false
+	case c.meta != nil && !metaContains(job.Meta, c.meta):
+		return false
+	default:
+		return true
+	}
 }
 
 func jsonEqual(a, b any) bool {
 	aj, _ := json.Marshal(a)
 	bj, _ := json.Marshal(b)
-	return string(aj) == string(bj)
+	return bytes.Equal(aj, bj)
 }
 
 func metaContains(actual, expected map[string]any) bool {
@@ -370,17 +376,25 @@ func metaContains(actual, expected map[string]any) bool {
 	return true
 }
 
-func describeStore(jobs []FakeJob, jobType string) string {
+// describeStore summarises what was actually enqueued, for appending to a failed
+// assertion. The asserted job type is already named by the caller's message, so
+// it is deliberately not a parameter here.
+//
+// The per-type counts are sorted: an unordered map walk made the same failure
+// print differently on every run, which is unreadable in a diff and impossible
+// to assert on.
+func describeStore(jobs []FakeJob) string {
 	if len(jobs) == 0 {
 		return "\n  No jobs were enqueued at all."
 	}
 	types := make(map[string]int)
-	for _, j := range jobs {
-		types[j.Type]++
+	for i := range jobs {
+		types[jobs[i].Type]++
 	}
-	var parts []string
+	parts := make([]string, 0, len(types))
 	for t, c := range types {
 		parts = append(parts, fmt.Sprintf("%s (%d)", t, c))
 	}
+	sort.Strings(parts)
 	return "\n  Enqueued: " + strings.Join(parts, ", ")
 }

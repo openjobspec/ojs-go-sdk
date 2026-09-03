@@ -27,71 +27,49 @@ func TestMLResourcesBuilder(t *testing.T) {
 		WithPrecision("fp16").
 		WithDistributedStrategy("tensor_parallel")
 
-	if res.Accelerator != "gpu" {
-		t.Errorf("expected accelerator=gpu, got %s", res.Accelerator)
-	}
-	if res.GPUType != "nvidia-a100" {
-		t.Errorf("expected gpu_type=nvidia-a100, got %s", res.GPUType)
-	}
-	if res.GPUCount != 2 {
-		t.Errorf("expected gpu_count=2, got %d", res.GPUCount)
-	}
-	if res.GPUMemoryGB != 40 {
-		t.Errorf("expected gpu_memory_gb=40, got %f", res.GPUMemoryGB)
-	}
-	if res.GPUComputeCapability != "8.0" {
-		t.Errorf("expected gpu_compute_capability=8.0, got %s", res.GPUComputeCapability)
-	}
-	if res.GPUInterconnect != "nvlink" {
-		t.Errorf("expected gpu_interconnect=nvlink, got %s", res.GPUInterconnect)
-	}
-	if res.MemoryGB != 64 {
-		t.Errorf("expected memory_gb=64, got %f", res.MemoryGB)
-	}
-	if res.CPUCores != 8 {
-		t.Errorf("expected cpu_cores=8, got %d", res.CPUCores)
-	}
-	if res.StorageGB != 500 {
-		t.Errorf("expected storage_gb=500, got %f", res.StorageGB)
-	}
-	if res.ShmSizeGB != 16 {
-		t.Errorf("expected shm_size_gb=16, got %f", res.ShmSizeGB)
-	}
-	if res.ModelID != "llama-3.1-70b" {
-		t.Errorf("expected model_id=llama-3.1-70b, got %s", res.ModelID)
-	}
-	if res.ModelVersion != "v1.0" {
-		t.Errorf("expected model_version=v1.0, got %s", res.ModelVersion)
-	}
-	if res.ModelProvider != "huggingface" {
-		t.Errorf("expected model_provider=huggingface, got %s", res.ModelProvider)
-	}
-	if res.ModelChecksum != "sha256:abc123" {
-		t.Errorf("expected model_checksum=sha256:abc123, got %s", res.ModelChecksum)
-	}
-	if res.ModelFormat != "safetensors" {
-		t.Errorf("expected model_format=safetensors, got %s", res.ModelFormat)
-	}
-	if res.MaxTokens != 4096 {
-		t.Errorf("expected max_tokens=4096, got %d", res.MaxTokens)
-	}
-	if res.MaxBatchSize != 32 {
-		t.Errorf("expected max_batch_size=32, got %d", res.MaxBatchSize)
-	}
-	if res.TimeoutSeconds != 300 {
-		t.Errorf("expected timeout_seconds=300, got %d", res.TimeoutSeconds)
-	}
-	if res.PriorityClass != "on-demand" {
-		t.Errorf("expected priority_class=on-demand, got %s", res.PriorityClass)
-	}
-	if res.Runtime != "vllm" {
-		t.Errorf("expected runtime=vllm, got %s", res.Runtime)
-	}
-	if res.Precision != "fp16" {
-		t.Errorf("expected precision=fp16, got %s", res.Precision)
-	}
-	if res.DistributedStrategy != "tensor_parallel" {
-		t.Errorf("expected distributed_strategy=tensor_parallel, got %s", res.DistributedStrategy)
+	// Every builder method makes the same promise — "store exactly this value
+	// on the returned copy" — so the assertions are a table rather than 22
+	// near-identical if/Errorf blocks. Float fields are written as float
+	// literals so the boxed comparison compares like with like.
+	assertMLFields(t, []mlFieldCheck{
+		{"accelerator", res.Accelerator, "gpu"},
+		{"gpu_type", res.GPUType, "nvidia-a100"},
+		{"gpu_count", res.GPUCount, 2},
+		{"gpu_memory_gb", res.GPUMemoryGB, 40.0},
+		{"gpu_compute_capability", res.GPUComputeCapability, "8.0"},
+		{"gpu_interconnect", res.GPUInterconnect, "nvlink"},
+		{"memory_gb", res.MemoryGB, 64.0},
+		{"cpu_cores", res.CPUCores, 8},
+		{"storage_gb", res.StorageGB, 500.0},
+		{"shm_size_gb", res.ShmSizeGB, 16.0},
+		{"model_id", res.ModelID, "llama-3.1-70b"},
+		{"model_version", res.ModelVersion, "v1.0"},
+		{"model_provider", res.ModelProvider, "huggingface"},
+		{"model_checksum", res.ModelChecksum, "sha256:abc123"},
+		{"model_format", res.ModelFormat, "safetensors"},
+		{"max_tokens", res.MaxTokens, 4096},
+		{"max_batch_size", res.MaxBatchSize, 32},
+		{"timeout_seconds", res.TimeoutSeconds, 300},
+		{"priority_class", res.PriorityClass, "on-demand"},
+		{"runtime", res.Runtime, "vllm"},
+		{"precision", res.Precision, "fp16"},
+		{"distributed_strategy", res.DistributedStrategy, "tensor_parallel"},
+	})
+}
+
+// mlFieldCheck is one "the builder stored this value" expectation.
+type mlFieldCheck struct {
+	field string
+	got   any
+	want  any
+}
+
+func assertMLFields(t *testing.T, checks []mlFieldCheck) {
+	t.Helper()
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("expected %s=%v, got %v", c.field, c.want, c.got)
+		}
 	}
 }
 
@@ -105,24 +83,15 @@ func TestMLResourcesTPUBuilder(t *testing.T) {
 		WithRuntime("tensorflow").
 		WithPrecision("bf16")
 
-	if res.Accelerator != "tpu" {
-		t.Errorf("expected accelerator=tpu, got %s", res.Accelerator)
-	}
-	if res.TPUType != "v5e" {
-		t.Errorf("expected tpu_type=v5e, got %s", res.TPUType)
-	}
-	if res.TPUTopology != "4x4" {
-		t.Errorf("expected tpu_topology=4x4, got %s", res.TPUTopology)
-	}
-	if res.TPUChipCount != 16 {
-		t.Errorf("expected tpu_chip_count=16, got %d", res.TPUChipCount)
-	}
-	if res.Runtime != "tensorflow" {
-		t.Errorf("expected runtime=tensorflow, got %s", res.Runtime)
-	}
-	if res.Precision != "bf16" {
-		t.Errorf("expected precision=bf16, got %s", res.Precision)
-	}
+	assertMLFields(t, []mlFieldCheck{
+		{"accelerator", res.Accelerator, "tpu"},
+		{"tpu_type", res.TPUType, "v5e"},
+		{"tpu_topology", res.TPUTopology, "4x4"},
+		{"tpu_chip_count", res.TPUChipCount, 16},
+		{"memory_gb", res.MemoryGB, 256.0},
+		{"runtime", res.Runtime, "tensorflow"},
+		{"precision", res.Precision, "bf16"},
+	})
 }
 
 func TestMLResourcesValidate(t *testing.T) {

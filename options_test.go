@@ -2,8 +2,11 @@ package ojs
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -14,6 +17,22 @@ func TestWithPriority(t *testing.T) {
 	cfg := resolveEnqueueConfig([]EnqueueOption{WithPriority(10)})
 	if cfg.priority != 10 {
 		t.Errorf("expected priority=10, got %d", cfg.priority)
+	}
+	if !cfg.prioritySet {
+		t.Error("expected prioritySet=true")
+	}
+}
+
+func TestWithPriorityZeroIsExplicit(t *testing.T) {
+	cfg := resolveEnqueueConfig([]EnqueueOption{WithPriority(0)})
+	if cfg.priority != 0 {
+		t.Errorf("expected priority=0, got %d", cfg.priority)
+	}
+	if !cfg.prioritySet {
+		t.Error("WithPriority(0) must be tracked as an explicit override")
+	}
+	if !cfg.hasOptionOverrides() {
+		t.Error("WithPriority(0) must produce wire options")
 	}
 }
 
@@ -232,7 +251,7 @@ func TestWorkerLogErrorWithLogger(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 
 	w := NewWorker("http://localhost:8080", WithLogger(logger))
-	w.logError(nil, "test error message",
+	w.logError(context.TODO(), "test error message",
 		slog.String("job.id", "j-1"),
 		slog.String("detail", "something broke"),
 	)
@@ -254,7 +273,7 @@ func TestWorkerLogWarnWithLogger(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 
 	w := NewWorker("http://localhost:8080", WithLogger(logger))
-	w.logWarn(nil, "test warning",
+	w.logWarn(context.TODO(), "test warning",
 		slog.String("error", "connection refused"),
 	)
 
@@ -270,6 +289,169 @@ func TestWorkerLogWarnWithLogger(t *testing.T) {
 func TestWorkerLogErrorWithoutLogger(t *testing.T) {
 	w := NewWorker("http://localhost:8080")
 	// Should not panic when logger is nil.
-	w.logError(nil, "this should be a no-op")
-	w.logWarn(nil, "this should also be a no-op")
+	w.logError(context.TODO(), "this should be a no-op")
+	w.logWarn(context.TODO(), "this should also be a no-op")
+}
+
+// --- Timeout presence ---
+
+func TestWithTimeoutZeroIsExplicit(t *testing.T) {
+	cfg := resolveEnqueueConfig([]EnqueueOption{WithTimeout(0)})
+	if cfg.timeoutMS != 0 {
+		t.Errorf("expected timeoutMS=0, got %d", cfg.timeoutMS)
+	}
+	if !cfg.timeoutSet {
+		t.Error("WithTimeout(0) must be tracked as an explicit override")
+	}
+	if !cfg.hasOptionOverrides() {
+		t.Error("WithTimeout(0) must produce wire options")
+	}
+}
+
+func TestTimeoutUnsetOmitsFromWire(t *testing.T) {
+	cfg := resolveEnqueueConfig(nil)
+	if cfg.timeoutSet {
+		t.Error("unset timeout must not be marked as set")
+	}
+	got, err := json.Marshal(buildWireOptions(cfg))
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(got) != `{}` {
+		t.Errorf("wire options JSON = %s, want {}", got)
+	}
+}
+
+func TestTimeoutPresenceGoldenJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		opts []EnqueueOption
+		want string
+	}{
+		{"unset", nil, `{}`},
+		{"nonzero", []EnqueueOption{WithTimeout(5 * time.Second)}, `{"timeout_ms":5000}`},
+		{"explicit zero", []EnqueueOption{WithTimeout(0)}, `{"timeout_ms":0}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := json.Marshal(buildWireOptions(resolveEnqueueConfig(tt.opts)))
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			if string(got) != tt.want {
+				t.Errorf("wire options JSON = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEnqueueTimeoutPresenceOnWire(t *testing.T) {
+	tests := []struct {
+		name    string
+		opts    []EnqueueOption
+		want    float64
+		wantSet bool
+	}{
+		{name: "unset"},
+		{name: "explicit zero", opts: []EnqueueOption{WithTimeout(0)}, want: 0, wantSet: true},
+		{name: "nonzero", opts: []EnqueueOption{WithTimeout(5 * time.Second)}, want: 5000, wantSet: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var body map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode enqueue request: %v", err)
+				}
+				w.Header().Set("Content-Type", ojsContentType)
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"job": map[string]any{"id": "job-1", "type": "test.job"},
+				})
+			}))
+			defer srv.Close()
+
+			client, err := NewClient(srv.URL)
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+			if _, err := client.Enqueue(context.Background(), "test.job", Args{}, tt.opts...); err != nil {
+				t.Fatalf("Enqueue: %v", err)
+			}
+
+			options, ok := body["options"].(map[string]any)
+			if !ok {
+				t.Fatalf("options = %T(%v), want object", body["options"], body["options"])
+			}
+			got, present := options["timeout_ms"]
+			if present != tt.wantSet {
+				t.Fatalf("timeout_ms presence = %v, want %v (options=%v)", present, tt.wantSet, options)
+			}
+			if tt.wantSet && got != tt.want {
+				t.Errorf("timeout_ms = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWorkflowTimeoutDefaultsOnWire(t *testing.T) {
+	tests := []struct {
+		name        string
+		defaultOpts []EnqueueOption
+		want        float64
+		wantSet     bool
+	}{
+		{name: "unset"},
+		{name: "explicit zero default", defaultOpts: []EnqueueOption{WithTimeout(0)}, want: 0, wantSet: true},
+		{name: "nonzero default", defaultOpts: []EnqueueOption{WithTimeout(5 * time.Second)}, want: 5000, wantSet: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			def := Chain(Step{Type: "a.job", Args: Args{}})
+			def.Options = tt.defaultOpts
+			body := decodeJSONMap(t, buildWorkflowRequest(&def, resolveWorkflowDefaults(def, nil)))
+			step := body["steps"].([]any)[0].(map[string]any)
+			options, hasOptions := step["options"].(map[string]any)
+			if !tt.wantSet {
+				if hasOptions {
+					if _, present := options["timeout_ms"]; present {
+						t.Fatalf("timeout_ms unexpectedly present: %v", options)
+					}
+				}
+				return
+			}
+			if !hasOptions {
+				t.Fatal("step options omitted, want materialized timeout")
+			}
+			if got := options["timeout_ms"]; got != tt.want {
+				t.Errorf("timeout_ms = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTimeoutZeroOverridesWorkflowDefault(t *testing.T) {
+	def := Chain(
+		Step{Type: "a.job", Args: Args{}, Options: []EnqueueOption{WithTimeout(0)}},
+		Step{Type: "b.job", Args: Args{}},
+	)
+	def.Options = []EnqueueOption{WithTimeout(30 * time.Second)}
+
+	req := buildWorkflowRequest(&def, resolveWorkflowDefaults(def, nil))
+	body := decodeJSONMap(t, req)
+
+	steps := body["steps"].([]any)
+	step0opts := steps[0].(map[string]any)["options"].(map[string]any)
+	step1opts := steps[1].(map[string]any)["options"].(map[string]any)
+
+	// Step 0: WithTimeout(0) overrides the 30s default, emitting timeout_ms:0.
+	if step0opts["timeout_ms"] != float64(0) {
+		t.Errorf("step-0 timeout_ms = %v, want 0 (explicit override)", step0opts["timeout_ms"])
+	}
+	// Step 1: inherits the 30s default.
+	if step1opts["timeout_ms"] != float64(30000) {
+		t.Errorf("step-1 timeout_ms = %v, want 30000 (inherited default)", step1opts["timeout_ms"])
+	}
 }

@@ -6,19 +6,28 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
 
+func mustNewDurableContext(t *testing.T, tp *transport, jobID string, attempt int) *DurableContext {
+	t.Helper()
+	dc, err := newDurableContext(context.Background(), tp, jobID, attempt)
+	if err != nil {
+		t.Fatalf("newDurableContext: %v", err)
+	}
+	return dc
+}
+
 func TestDurableContextNow(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Resume endpoint returns no checkpoint
-		json.NewEncoder(w).Encode(map[string]bool{"has_checkpoint": false})
+		http.NotFound(w, r)
 	}))
 	defer srv.Close()
 
 	tp := newTransport(srv.URL, clientConfig{})
-	dc := newDurableContext(context.Background(), tp, "job-1", 1)
+	dc := mustNewDurableContext(t, tp, "job-1", 1)
 
 	t1 := dc.Now()
 	if t1.IsZero() {
@@ -34,12 +43,12 @@ func TestDurableContextNow(t *testing.T) {
 
 func TestDurableContextRandom(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]bool{"has_checkpoint": false})
+		http.NotFound(w, r)
 	}))
 	defer srv.Close()
 
 	tp := newTransport(srv.URL, clientConfig{})
-	dc := newDurableContext(context.Background(), tp, "job-2", 1)
+	dc := mustNewDurableContext(t, tp, "job-2", 1)
 
 	r := dc.Random(16)
 	if len(r) != 32 { // hex doubles bytes
@@ -49,12 +58,12 @@ func TestDurableContextRandom(t *testing.T) {
 
 func TestDurableContextSideEffect(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]bool{"has_checkpoint": false})
+		http.NotFound(w, r)
 	}))
 	defer srv.Close()
 
 	tp := newTransport(srv.URL, clientConfig{})
-	dc := newDurableContext(context.Background(), tp, "job-3", 1)
+	dc := mustNewDurableContext(t, tp, "job-3", 1)
 
 	var callCount int32
 	result, err := dc.SideEffect("compute", func() (any, error) {
@@ -77,12 +86,12 @@ func TestDurableContextSideEffect(t *testing.T) {
 
 func TestDurableContextSideEffectError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]bool{"has_checkpoint": false})
+		http.NotFound(w, r)
 	}))
 	defer srv.Close()
 
 	tp := newTransport(srv.URL, clientConfig{})
-	dc := newDurableContext(context.Background(), tp, "job-4", 1)
+	dc := mustNewDurableContext(t, tp, "job-4", 1)
 
 	_, err := dc.SideEffect("fail", func() (any, error) {
 		return nil, fmt.Errorf("external API error")
@@ -102,11 +111,20 @@ func TestDurableContextReplayFromCheckpoint(t *testing.T) {
 	logJSON, _ := json.Marshal(replayLog)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if got := r.URL.EscapedPath(); got != "/ojs/v1/jobs/job-replay/checkpoint" {
+			t.Errorf("path = %s, want standard checkpoint path", got)
+		}
 		json.NewEncoder(w).Encode(map[string]any{
-			"has_checkpoint": true,
 			"checkpoint": map[string]any{
-				"metadata": map[string]string{
-					"_replay_log": string(logJSON),
+				"state": map[string]any{
+					"ojs_go_durable_version": durableCheckpointVersion,
+					"state":                  nil,
+					"step_index":             2,
+					"replay_log":             json.RawMessage(logJSON),
+					"attempt":                1,
 				},
 			},
 		})
@@ -114,7 +132,7 @@ func TestDurableContextReplayFromCheckpoint(t *testing.T) {
 	defer srv.Close()
 
 	tp := newTransport(srv.URL, clientConfig{})
-	dc := newDurableContext(context.Background(), tp, "job-replay", 2)
+	dc := mustNewDurableContext(t, tp, "job-replay", 2)
 
 	if !dc.IsReplaying() {
 		t.Fatal("expected to be in replay mode")
@@ -157,20 +175,30 @@ func TestDurableContextReplayFromCheckpoint(t *testing.T) {
 }
 
 func TestDurableContextCheckpoint(t *testing.T) {
-	var savedBody json.RawMessage
+	var saved checkpointRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "PUT" {
-			body, _ := json.Marshal(map[string]any{"job_id": "job-cp", "version": 1})
-			savedBody = body
-			w.Write(body)
-			return
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
 		}
-		json.NewEncoder(w).Encode(map[string]bool{"has_checkpoint": false})
+		if got := r.URL.EscapedPath(); got != "/ojs/v1/jobs/job-cp/checkpoint" {
+			t.Errorf("path = %s, want standard checkpoint path", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&saved); err != nil {
+			t.Errorf("decode checkpoint request: %v", err)
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"checkpoint": map[string]any{"job_id": "job-cp", "sequence": 1},
+		})
 	}))
 	defer srv.Close()
 
 	tp := newTransport(srv.URL, clientConfig{})
-	dc := newDurableContext(context.Background(), tp, "job-cp", 1)
+	dc := &DurableContext{
+		parent:    context.Background(),
+		transport: tp,
+		jobID:     "job-cp",
+		attempt:   1,
+	}
 
 	dc.Now()
 	dc.Random(8)
@@ -179,8 +207,17 @@ func TestDurableContextCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Checkpoint: %v", err)
 	}
-	if savedBody == nil {
-		t.Error("expected checkpoint to be saved")
+	if saved.State.StepIndex != 2 || saved.State.Attempt != 1 {
+		t.Errorf("saved checkpoint metadata = %+v", saved.State)
+	}
+	if saved.State.Version != durableCheckpointVersion {
+		t.Errorf("saved checkpoint version = %d, want %d", saved.State.Version, durableCheckpointVersion)
+	}
+	if got := string(saved.State.State); got != `{"step":"transform"}` {
+		t.Errorf("saved state = %s, want caller state", got)
+	}
+	if len(saved.State.ReplayLog) != 2 {
+		t.Errorf("saved replay log length = %d, want 2", len(saved.State.ReplayLog))
 	}
 }
 
@@ -189,15 +226,18 @@ func TestDurableContextComplete(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "DELETE" {
 			deleted = true
+			if got := r.URL.EscapedPath(); got != "/ojs/v1/jobs/job-complete/checkpoint" {
+				t.Errorf("path = %s, want standard checkpoint path", got)
+			}
 			json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]bool{"has_checkpoint": false})
+		http.NotFound(w, r)
 	}))
 	defer srv.Close()
 
 	tp := newTransport(srv.URL, clientConfig{})
-	dc := newDurableContext(context.Background(), tp, "job-complete", 1)
+	dc := mustNewDurableContext(t, tp, "job-complete", 1)
 
 	err := dc.Complete()
 	if err != nil {
@@ -228,8 +268,8 @@ func TestRegisterDurable(t *testing.T) {
 	}
 }
 
-func TestDurableContextNoCheckpointServer(t *testing.T) {
-	// Server that returns 404 for checkpoint endpoints
+func TestDurableContextNoCheckpoint(t *testing.T) {
+	// Per the durable execution spec, 404 means the job has no checkpoint.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
 		json.NewEncoder(w).Encode(map[string]string{"error": "not found"})
@@ -237,15 +277,138 @@ func TestDurableContextNoCheckpointServer(t *testing.T) {
 	defer srv.Close()
 
 	tp := newTransport(srv.URL, clientConfig{})
-	dc := newDurableContext(context.Background(), tp, "job-no-cp", 1)
-
-	// Should work in record mode even without checkpoint server
+	dc, err := newDurableContext(context.Background(), tp, "job-no-cp", 1)
+	if err != nil {
+		t.Fatalf("newDurableContext: %v", err)
+	}
 	if dc.IsReplaying() {
-		t.Error("expected record mode when checkpoint server unavailable")
+		t.Fatal("new context unexpectedly entered replay mode")
+	}
+	if now := dc.Now(); now.IsZero() {
+		t.Fatal("record mode did not produce a time")
+	}
+}
+
+func TestRegisterDurableSkipsHandlerWhenCheckpointLoadFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "checkpoint service unavailable", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	w := NewWorker(srv.URL)
+	called := false
+	w.RegisterDurable("durable.job", func(JobContext, *DurableContext) error {
+		called = true
+		return nil
+	})
+
+	w.handlersMu.RLock()
+	handler := w.handlers["durable.job"]
+	w.handlersMu.RUnlock()
+
+	err := handler(NewJobContextForTest(Job{
+		ID:      "job-load-failure",
+		Type:    "durable.job",
+		Attempt: 1,
+	}))
+	if err == nil {
+		t.Fatal("expected checkpoint load error")
+	}
+	if called {
+		t.Fatal("durable handler ran without a verified replay state")
+	}
+}
+
+func TestDurableCheckpointLoadFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "checkpoint service unavailable", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	tp := newTransport(srv.URL, clientConfig{})
+	dc, err := newDurableContext(context.Background(), tp, "job-load-failure", 1)
+	if err == nil {
+		t.Fatal("expected checkpoint load error")
+	}
+	if dc != nil {
+		t.Fatalf("newDurableContext returned context %#v after load failure", dc)
+	}
+	if got := err.Error(); !strings.Contains(got, `load durable checkpoint for job "job-load-failure"`) {
+		t.Fatalf("error = %q, want job-specific checkpoint context", got)
+	}
+}
+
+func TestDurableCheckpointRejectsForeignState(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"checkpoint": map[string]any{
+				"state": map[string]any{"processed_count": 5000},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	tp := newTransport(srv.URL, clientConfig{})
+	dc, err := newDurableContext(context.Background(), tp, "job-foreign-state", 1)
+	if err == nil || !strings.Contains(err.Error(), "unsupported SDK state version") {
+		t.Fatalf("newDurableContext error = %v, want unsupported state version", err)
+	}
+	if dc != nil {
+		t.Fatalf("newDurableContext returned context %#v for incompatible state", dc)
+	}
+}
+
+func TestDurableCheckpointPathEscapesJobID(t *testing.T) {
+	if got, want := durableCheckpointPath("job/with?reserved"), "/ojs/v1/jobs/job%2Fwith%3Freserved/checkpoint"; got != want {
+		t.Fatalf("durableCheckpointPath = %q, want %q", got, want)
+	}
+}
+
+func TestDurableReplayTypeMismatchFailsFast(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(*DurableContext)
+	}{
+		{name: "now", call: func(dc *DurableContext) { dc.Now() }},
+		{name: "random", call: func(dc *DurableContext) { dc.Random(4) }},
 	}
 
-	t1 := dc.Now()
-	if t1.IsZero() {
-		t.Error("expected valid time in record mode")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dc := &DurableContext{
+				entries:   []sideEffectEntry{{Seq: 0, Type: "call", Result: json.RawMessage(`null`)}},
+				replaying: true,
+			}
+
+			defer func() {
+				recovered := recover()
+				if recovered == nil {
+					t.Fatal("expected replay mismatch panic")
+				}
+				if got := fmt.Sprint(recovered); !strings.Contains(got, "durable replay type mismatch") {
+					t.Fatalf("panic = %q, want replay type mismatch", got)
+				}
+			}()
+			tt.call(dc)
+		})
+	}
+}
+
+func TestDurableSideEffectRejectsReplayTypeMismatch(t *testing.T) {
+	dc := &DurableContext{
+		entries:   []sideEffectEntry{{Seq: 0, Type: "time", Result: json.RawMessage(`"2026-01-15T10:00:00Z"`)}},
+		replaying: true,
+	}
+	called := false
+
+	_, err := dc.SideEffect("fetch", func() (any, error) {
+		called = true
+		return "live", nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "durable replay type mismatch") {
+		t.Fatalf("SideEffect error = %v, want replay type mismatch", err)
+	}
+	if called {
+		t.Fatal("SideEffect executed live code after a replay mismatch")
 	}
 }

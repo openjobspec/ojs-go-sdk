@@ -15,6 +15,7 @@
 //	handler := serverless.NewLambdaHandler(
 //	    serverless.WithOJSURL("https://ojs.example.com"),
 //	    serverless.WithTimeout(25*time.Second), // leave margin for Lambda timeout
+//	    serverless.WithPushSigningSecrets(os.Getenv("OJS_PUSH_SIGNING_SECRET")),
 //	)
 //
 //	handler.Register("email.send", func(ctx context.Context, job serverless.JobEvent) error {
@@ -36,6 +37,7 @@
 //	handler := serverless.NewCloudflareHandler(
 //	    serverless.WithCloudflareOJSURL("https://ojs.example.com"),
 //	    serverless.WithCloudflareTimeout(25*time.Second),
+//	    serverless.WithCloudflarePushSigningSecrets(os.Getenv("OJS_PUSH_SIGNING_SECRET")),
 //	)
 //
 //	handler.Register("image.resize", func(ctx context.Context, job serverless.JobEvent) error {
@@ -56,6 +58,7 @@
 //	handler := serverless.NewVercelHandler(
 //	    serverless.WithVercelOJSURL("https://ojs.example.com"),
 //	    serverless.WithVercelTimeout(10*time.Second),
+//	    serverless.WithVercelPushSigningSecrets(os.Getenv("OJS_PUSH_SIGNING_SECRET")),
 //	)
 //
 //	handler.Register("report.generate", func(ctx context.Context, job serverless.JobEvent) error {
@@ -75,6 +78,11 @@
 // All handlers support HTTP push delivery where the OJS server POSTs
 // job payloads to a function URL. Use [LambdaHandler.HandleHTTP],
 // [CloudflareHandler.ServeHTTP], or [VercelHandler.ServeHTTP] for this pattern.
+// Push endpoints fail closed unless one or more HMAC secrets are configured.
+// The signature covers X-OJS-Timestamp + "." + the exact raw request body,
+// accepts multiple signatures/secrets for rotation, and defaults to a
+// five-minute freshness window. The explicitly insecure local-development
+// options are never appropriate for a deployed endpoint.
 //
 // # Timeout Handling
 //

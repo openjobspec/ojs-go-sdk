@@ -33,8 +33,8 @@ func TestAllCanonicalCodesAreUnique(t *testing.T) {
 
 func TestLookupByCode(t *testing.T) {
 	tests := []struct {
-		code    string
-		wantNil bool
+		code     string
+		wantNil  bool
 		wantName string
 	}{
 		{"OJS-1000", false, "InvalidPayload"},

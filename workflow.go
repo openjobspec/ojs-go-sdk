@@ -2,6 +2,7 @@ package ojs
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"time"
@@ -47,7 +48,9 @@ type WorkflowDefinition struct {
 	// Callbacks are the batch callbacks (used by Batch).
 	Callbacks *BatchCallbacks
 
-	// Options are default enqueue options for all steps.
+	// Options are default enqueue options for all steps. Metadata options are
+	// materialized into every job/callback because workflow-root meta is not
+	// part of the OJS workflow schema.
 	Options []EnqueueOption
 }
 
@@ -63,10 +66,28 @@ type BatchCallbacks struct {
 	OnFailure *Step
 }
 
+// Workflow primitive identifiers used by WorkflowDefinition.Type.
+const (
+	workflowTypeChain = "chain"
+	workflowTypeGroup = "group"
+	workflowTypeBatch = "batch"
+)
+
+// Batch callback keys on the wire `callbacks` object
+// (workflow.schema.json `callbacks.on_complete`/`on_success`/`on_failure`).
+// Callbacks are addressed by this key, not by a synthetic step id: unlike the
+// earlier flattened wire, a callback is never one of a "steps"/"jobs" array
+// entry that needs an id to be found.
+const (
+	callbackKeyOnComplete = "on_complete"
+	callbackKeyOnSuccess  = "on_success"
+	callbackKeyOnFailure  = "on_failure"
+)
+
 // Chain creates a sequential workflow definition where steps execute one after another.
 func Chain(steps ...Step) WorkflowDefinition {
 	return WorkflowDefinition{
-		Type:  "chain",
+		Type:  workflowTypeChain,
 		Steps: steps,
 	}
 }
@@ -74,7 +95,7 @@ func Chain(steps ...Step) WorkflowDefinition {
 // Group creates a parallel workflow definition where all jobs execute concurrently.
 func Group(jobs ...Step) WorkflowDefinition {
 	return WorkflowDefinition{
-		Type: "group",
+		Type: workflowTypeGroup,
 		Jobs: jobs,
 	}
 }
@@ -82,7 +103,7 @@ func Group(jobs ...Step) WorkflowDefinition {
 // Batch creates a parallel workflow with callbacks based on collective outcome.
 func Batch(callbacks BatchCallbacks, jobs ...Step) WorkflowDefinition {
 	return WorkflowDefinition{
-		Type:      "batch",
+		Type:      workflowTypeBatch,
 		Jobs:      jobs,
 		Callbacks: &callbacks,
 	}
@@ -94,60 +115,109 @@ const MaxWorkflowSteps = 500
 // Validate checks a WorkflowDefinition for common errors before sending to the server.
 func (d WorkflowDefinition) Validate() error {
 	switch d.Type {
-	case "chain":
-		if len(d.Steps) < 1 {
-			return fmt.Errorf("ojs: chain workflow requires at least 1 step")
+	case workflowTypeChain:
+		return validateSteps("chain", "step", d.Steps, 1)
+	case workflowTypeGroup:
+		return validateSteps("group", "job", d.Jobs, 1)
+	case workflowTypeBatch:
+		if err := validateSteps("batch", "job", d.Jobs, 1); err != nil {
+			return err
 		}
-		if len(d.Steps) > MaxWorkflowSteps {
-			return fmt.Errorf("ojs: chain workflow exceeds maximum of %d steps (got %d)", MaxWorkflowSteps, len(d.Steps))
-		}
-		for i, s := range d.Steps {
-			if s.Type == "" {
-				return fmt.Errorf("ojs: chain step %d has empty type", i)
-			}
-		}
-	case "group":
-		if len(d.Jobs) < 2 {
-			return fmt.Errorf("ojs: group workflow requires at least 2 parallel jobs")
-		}
-		if len(d.Jobs) > MaxWorkflowSteps {
-			return fmt.Errorf("ojs: group workflow exceeds maximum of %d jobs (got %d)", MaxWorkflowSteps, len(d.Jobs))
-		}
-		for i, s := range d.Jobs {
-			if s.Type == "" {
-				return fmt.Errorf("ojs: group job %d has empty type", i)
-			}
-		}
-	case "batch":
-		if len(d.Jobs) < 1 {
-			return fmt.Errorf("ojs: batch workflow requires at least 1 job")
-		}
-		if len(d.Jobs) > MaxWorkflowSteps {
-			return fmt.Errorf("ojs: batch workflow exceeds maximum of %d jobs (got %d)", MaxWorkflowSteps, len(d.Jobs))
-		}
-		if d.Callbacks == nil || (d.Callbacks.OnComplete == nil && d.Callbacks.OnSuccess == nil && d.Callbacks.OnFailure == nil) {
-			return fmt.Errorf("ojs: batch workflow requires at least one callback (on_complete, on_success, or on_failure)")
-		}
+		return validateBatchCallbacks(d.Callbacks)
 	default:
 		return fmt.Errorf("ojs: unknown workflow type %q (expected chain, group, or batch)", d.Type)
+	}
+}
+
+// validateSteps enforces the cardinality and per-step rules shared by every
+// workflow primitive.
+func validateSteps(primitive, noun string, steps []Step, minCount int) error {
+	if len(steps) < minCount {
+		if minCount == 1 {
+			return fmt.Errorf("ojs: %s workflow requires at least 1 %s", primitive, noun)
+		}
+		return fmt.Errorf("ojs: %s workflow requires at least %d parallel %ss", primitive, minCount, noun)
+	}
+	if len(steps) > MaxWorkflowSteps {
+		return fmt.Errorf("ojs: %s workflow exceeds maximum of %d %ss (got %d)", primitive, MaxWorkflowSteps, noun, len(steps))
+	}
+	for i, s := range steps {
+		if s.Type == "" {
+			return fmt.Errorf("ojs: %s %s %d has empty type", primitive, noun, i)
+		}
+	}
+	return nil
+}
+
+// validateBatchCallbacks requires at least one callback and rejects callbacks
+// that carry no job type, which would otherwise be sent as an unroutable step.
+func validateBatchCallbacks(cb *BatchCallbacks) error {
+	if cb == nil || (cb.OnComplete == nil && cb.OnSuccess == nil && cb.OnFailure == nil) {
+		return fmt.Errorf("ojs: batch workflow requires at least one callback (on_complete, on_success, or on_failure)")
+	}
+	for _, c := range []struct {
+		name string
+		step *Step
+	}{
+		{"on_complete", cb.OnComplete},
+		{"on_success", cb.OnSuccess},
+		{"on_failure", cb.OnFailure},
+	} {
+		if c.step != nil && c.step.Type == "" {
+			return fmt.Errorf("ojs: batch callback %s has empty type", c.name)
+		}
 	}
 	return nil
 }
 
 // Workflow represents the server response for a workflow.
+//
+// Fields added backward-compatibly; all new fields use pointer or omitempty
+// semantics so existing keyed-literal constructors compile unchanged.
 type Workflow struct {
 	ID        string        `json:"id"`
 	Name      string        `json:"name"`
+	Type      string        `json:"type,omitempty"`
 	State     WorkflowState `json:"state"`
 	CreatedAt *time.Time    `json:"created_at,omitempty"`
 
 	// Steps contains the status of each workflow step.
 	Steps []WorkflowStep `json:"steps,omitempty"`
 
+	// Progress counters for chains and groups/batches.
+	StepsTotal     *int `json:"steps_total,omitempty"`
+	StepsCompleted *int `json:"steps_completed,omitempty"`
+	JobsTotal      *int `json:"jobs_total,omitempty"`
+	JobsCompleted  *int `json:"jobs_completed,omitempty"`
+
+	// Callbacks echoes the batch callback configuration.
+	Callbacks *WorkflowResponseCallbacks `json:"callbacks,omitempty"`
+
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+
 	// For cancel responses.
 	CancelledAt          *time.Time `json:"cancelled_at,omitempty"`
 	StepsCancelled       int        `json:"steps_cancelled,omitempty"`
 	StepsAlreadyComplete int        `json:"steps_already_completed,omitempty"`
+}
+
+// WorkflowResponseCallbacks echoes the batch callback configuration in the
+// workflow response, matching the backend JSON shape.
+type WorkflowResponseCallbacks struct {
+	OnComplete *WorkflowResponseCallback `json:"on_complete,omitempty"`
+	OnSuccess  *WorkflowResponseCallback `json:"on_success,omitempty"`
+	OnFailure  *WorkflowResponseCallback `json:"on_failure,omitempty"`
+}
+
+// WorkflowResponseCallback describes a single callback in the response.
+type WorkflowResponseCallback struct {
+	Type string `json:"type"`
+	// Args are preserved as raw JSON from the server.
+	Args json.RawMessage `json:"args,omitempty"`
+	// Options are preserved as raw JSON so callback enqueue settings from newer
+	// backends remain available without coupling this response model to private
+	// request wire types.
+	Options json.RawMessage `json:"options,omitempty"`
 }
 
 // WorkflowStep represents the status of an individual step in a workflow.
@@ -162,110 +232,18 @@ type WorkflowStep struct {
 	Result      map[string]any `json:"result,omitempty"`
 }
 
-// --- Wire format types ---
-
-type workflowRequest struct {
-	Name    string              `json:"name,omitempty"`
-	Steps   []workflowStepWire `json:"steps"`
-	Options *wireOptions        `json:"options,omitempty"`
-}
-
-type workflowStepWire struct {
-	ID        string       `json:"id"`
-	Type      string       `json:"type"`
-	Args      []any        `json:"args"`
-	DependsOn []string     `json:"depends_on"`
-	Options   *wireOptions `json:"options,omitempty"`
-}
-
 // CreateWorkflow creates and starts a workflow.
 func (c *Client) CreateWorkflow(ctx context.Context, def WorkflowDefinition, opts ...EnqueueOption) (*Workflow, error) {
 	if err := def.Validate(); err != nil {
 		return nil, err
 	}
 
-	cfg := resolveEnqueueConfig(opts)
-
-	req := workflowRequest{
-		Name: def.Name,
+	cfg := resolveWorkflowDefaults(def, opts)
+	if err := validateQueue(cfg.queue); err != nil {
+		return nil, err
 	}
 
-	if cfg.queue != "default" || cfg.timeoutMS > 0 {
-		req.Options = buildWireOptions(cfg)
-	}
-
-	switch def.Type {
-	case "chain":
-		for i, s := range def.Steps {
-			stepCfg := resolveEnqueueConfig(s.Options)
-			step := workflowStepWire{
-				ID:        fmt.Sprintf("step-%d", i),
-				Type:      s.Type,
-				Args:      argsToWire(s.Args),
-				DependsOn: []string{},
-			}
-			if i > 0 {
-				step.DependsOn = []string{fmt.Sprintf("step-%d", i-1)}
-			}
-			if stepCfg.queue != "default" || stepCfg.timeoutMS > 0 {
-				step.Options = buildWireOptions(stepCfg)
-			}
-			req.Steps = append(req.Steps, step)
-		}
-
-	case "group":
-		for i, s := range def.Jobs {
-			step := workflowStepWire{
-				ID:        fmt.Sprintf("job-%d", i),
-				Type:      s.Type,
-				Args:      argsToWire(s.Args),
-				DependsOn: []string{},
-			}
-			req.Steps = append(req.Steps, step)
-		}
-
-	case "batch":
-		for i, s := range def.Jobs {
-			step := workflowStepWire{
-				ID:        fmt.Sprintf("job-%d", i),
-				Type:      s.Type,
-				Args:      argsToWire(s.Args),
-				DependsOn: []string{},
-			}
-			req.Steps = append(req.Steps, step)
-		}
-		// Add callback steps that depend on all jobs.
-		jobIDs := make([]string, len(def.Jobs))
-		for i := range def.Jobs {
-			jobIDs[i] = fmt.Sprintf("job-%d", i)
-		}
-		if def.Callbacks != nil {
-			if def.Callbacks.OnComplete != nil {
-				req.Steps = append(req.Steps, workflowStepWire{
-					ID:        "on-complete",
-					Type:      def.Callbacks.OnComplete.Type,
-					Args:      argsToWire(def.Callbacks.OnComplete.Args),
-					DependsOn: jobIDs,
-				})
-			}
-			if def.Callbacks.OnSuccess != nil {
-				req.Steps = append(req.Steps, workflowStepWire{
-					ID:        "on-success",
-					Type:      def.Callbacks.OnSuccess.Type,
-					Args:      argsToWire(def.Callbacks.OnSuccess.Args),
-					DependsOn: jobIDs,
-				})
-			}
-			if def.Callbacks.OnFailure != nil {
-				req.Steps = append(req.Steps, workflowStepWire{
-					ID:        "on-failure",
-					Type:      def.Callbacks.OnFailure.Type,
-					Args:      argsToWire(def.Callbacks.OnFailure.Args),
-					DependsOn: jobIDs,
-				})
-			}
-		}
-	}
+	req := buildWorkflowRequest(&def, cfg)
 
 	var resp struct {
 		Workflow Workflow `json:"workflow"`
@@ -274,6 +252,25 @@ func (c *Client) CreateWorkflow(ctx context.Context, def WorkflowDefinition, opt
 		return nil, err
 	}
 	return &resp.Workflow, nil
+}
+
+// resolveWorkflowDefaults merges the documented WorkflowDefinition.Options
+// field with CreateWorkflow's own variadic enqueue options. The result is
+// materialized into every job and callback because the shared workflow request
+// has no root enqueue-options field.
+//
+// def.Options is the reusable definition-level default; opts are supplied at
+// the CreateWorkflow call site and are applied afterward, so a caller building
+// a shared WorkflowDefinition can still override a specific field (e.g. the
+// queue) for one invocation without mutating the definition. This preserves
+// CreateWorkflow's existing variadic-option contract: a definition with no
+// Options set behaves exactly as before, driven entirely by the call-site
+// opts.
+func resolveWorkflowDefaults(def WorkflowDefinition, opts []EnqueueOption) enqueueConfig {
+	merged := make([]EnqueueOption, 0, len(def.Options)+len(opts))
+	merged = append(merged, def.Options...)
+	merged = append(merged, opts...)
+	return resolveEnqueueConfig(merged)
 }
 
 // GetWorkflow retrieves the current state of a workflow.

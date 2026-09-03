@@ -2,7 +2,10 @@ package federation
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
+	"sort"
 	"sync"
 	"time"
 
@@ -11,9 +14,9 @@ import (
 
 // FederatedClient wraps multiple region clients with routing and failover.
 type FederatedClient struct {
-	regions      map[string]*regionState
-	localRegion  string
-	strategy     RoutingStrategy
+	regions          map[string]*regionState
+	localRegion      string
+	strategy         RoutingStrategy
 	healthInterval   time.Duration
 	failureThreshold int32
 	cooldownPeriod   time.Duration
@@ -21,6 +24,10 @@ type FederatedClient struct {
 	mu       sync.RWMutex
 	stopOnce sync.Once
 	stopped  chan struct{}
+
+	// optErrs collects failures raised while applying options, so New can
+	// report them instead of silently dropping the affected region.
+	optErrs []error
 }
 
 // Option configures the FederatedClient.
@@ -34,6 +41,7 @@ func WithRegion(cfg RegionConfig) Option {
 		}
 		client, err := ojs.NewClient(cfg.URL)
 		if err != nil {
+			fc.optErrs = append(fc.optErrs, fmt.Errorf("region %q: %w", cfg.ID, err))
 			return
 		}
 		rs := &regionState{
@@ -108,8 +116,18 @@ func WithHealthInterval(d time.Duration) Option {
 
 // WithFailureThreshold sets the number of consecutive failures before
 // a circuit breaker opens.
+//
+// n must be non-negative and fit in an int32. A larger value used to wrap to a
+// negative threshold, so `count >= threshold` held on the very first failure
+// and every circuit opened immediately — the exact opposite of what a high
+// threshold asks for. Out-of-range values are now reported by [New].
 func WithFailureThreshold(n int) Option {
 	return func(fc *FederatedClient) {
+		if n < 0 || n > math.MaxInt32 {
+			fc.optErrs = append(fc.optErrs,
+				fmt.Errorf("failure threshold %d out of range [0, %d]", n, math.MaxInt32))
+			return
+		}
 		fc.failureThreshold = int32(n)
 	}
 }
@@ -134,6 +152,9 @@ func New(opts ...Option) (*FederatedClient, error) {
 	for _, opt := range opts {
 		opt(fc)
 	}
+	if len(fc.optErrs) > 0 {
+		return nil, fmt.Errorf("ojs federation: invalid region configuration: %w", errors.Join(fc.optErrs...))
+	}
 	if len(fc.regions) == 0 {
 		return nil, ErrNoRegions
 	}
@@ -142,6 +163,13 @@ func New(opts ...Option) (*FederatedClient, error) {
 
 // NewFromConfig creates a FederatedClient from a declarative FederationConfig.
 func NewFromConfig(cfg FederationConfig) (*FederatedClient, error) {
+	if cfg.FailureThreshold < 0 {
+		return nil, fmt.Errorf(
+			"ojs federation: invalid config: failure threshold %d must be non-negative",
+			cfg.FailureThreshold,
+		)
+	}
+
 	var opts []Option
 	for _, r := range cfg.Regions {
 		opts = append(opts, WithRegion(r))
@@ -277,14 +305,16 @@ func (fc *FederatedClient) RegionClient(regionID string) (*ojs.Client, error) {
 	return rs.client, nil
 }
 
-// Regions returns the list of configured region IDs.
+// Regions returns the list of configured region IDs in a stable (sorted)
+// order, so callers can compare or display the result deterministically.
 func (fc *FederatedClient) Regions() []string {
 	fc.mu.RLock()
-	defer fc.mu.RUnlock()
 	ids := make([]string, 0, len(fc.regions))
 	for id := range fc.regions {
 		ids = append(ids, id)
 	}
+	fc.mu.RUnlock()
+	sort.Strings(ids)
 	return ids
 }
 

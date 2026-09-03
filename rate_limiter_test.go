@@ -410,18 +410,23 @@ func TestShouldRetryFunction(t *testing.T) {
 		retryServerErrors bool
 		attempt           int
 		maxRetries        int
+		retryEligible     bool
+		retryAfterValid   bool
 		expected          bool
 	}{
-		{"429 retried", 429, true, 0, 3, true},
-		{"502 retried when enabled", 502, true, 0, 3, true},
-		{"503 retried when enabled", 503, true, 0, 3, true},
-		{"504 retried when enabled", 504, true, 0, 3, true},
-		{"502 not retried when disabled", 502, false, 0, 3, false},
-		{"500 never retried", 500, true, 0, 3, false},
-		{"501 never retried", 501, true, 0, 3, false},
-		{"429 not retried at max attempts", 429, true, 3, 3, false},
-		{"200 not retried", 200, true, 0, 3, false},
-		{"400 not retried", 400, true, 0, 3, false},
+		{"429 retried", 429, true, 0, 3, true, false, true},
+		{"502 retried when enabled", 502, true, 0, 3, true, false, true},
+		{"503 retried when enabled", 503, true, 0, 3, true, false, true},
+		{"504 retried when enabled", 504, true, 0, 3, true, false, true},
+		{"502 not retried when disabled", 502, false, 0, 3, true, false, false},
+		{"500 never retried", 500, true, 0, 3, true, false, false},
+		{"501 never retried", 501, true, 0, 3, true, false, false},
+		{"429 not retried at max attempts", 429, true, 3, 3, true, true, false},
+		{"200 not retried", 200, true, 0, 3, true, false, false},
+		{"400 not retried", 400, true, 0, 3, true, false, false},
+		{"429 with valid Retry-After bypasses operation gate", 429, true, 0, 3, false, true, true},
+		{"429 without valid Retry-After obeys operation gate", 429, true, 0, 3, false, false, false},
+		{"503 obeys operation gate", 503, true, 0, 3, false, true, false},
 	}
 
 	for _, tt := range tests {
@@ -431,10 +436,31 @@ func TestShouldRetryFunction(t *testing.T) {
 				Enabled:           true,
 				RetryServerErrors: tt.retryServerErrors,
 			}
-			got := cfg.shouldRetry(tt.statusCode, tt.attempt)
+			got := cfg.shouldRetry(tt.statusCode, tt.attempt, tt.retryEligible, tt.retryAfterValid)
 			if got != tt.expected {
-				t.Errorf("shouldRetry(%d, attempt=%d, serverErrors=%v) = %v, want %v",
-					tt.statusCode, tt.attempt, tt.retryServerErrors, got, tt.expected)
+				t.Errorf("shouldRetry(%d, attempt=%d, serverErrors=%v, retryEligible=%v, retryAfterValid=%v) = %v, want %v",
+					tt.statusCode, tt.attempt, tt.retryServerErrors, tt.retryEligible, tt.retryAfterValid, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestRetryEligibleForMethod(t *testing.T) {
+	tests := []struct {
+		method string
+		want   bool
+	}{
+		{http.MethodGet, true},
+		{http.MethodHead, true},
+		{http.MethodDelete, true},
+		{http.MethodPut, true},
+		{http.MethodPost, false},
+		{http.MethodPatch, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method, func(t *testing.T) {
+			if got := retryEligibleForMethod(tt.method); got != tt.want {
+				t.Errorf("retryEligibleForMethod(%s) = %v, want %v", tt.method, got, tt.want)
 			}
 		})
 	}

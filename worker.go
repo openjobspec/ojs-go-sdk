@@ -2,6 +2,7 @@ package ojs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,85 +11,17 @@ import (
 	"time"
 )
 
-// WorkerState represents the lifecycle state of a worker.
-type WorkerState string
-
-const (
-	WorkerStateRunning   WorkerState = "running"
-	WorkerStateQuiet     WorkerState = "quiet"
-	WorkerStateTerminate WorkerState = "terminate"
-)
-
-// jobResultRef is a mutable container for a job's result, shared across
-// JobContext copies so that SetResult works through the middleware chain.
-type jobResultRef struct {
-	data map[string]any
-}
-
-// JobContext provides execution-scoped state and capabilities to job handlers.
-type JobContext struct {
-	// Job is the full job envelope.
-	Job Job
-
-	// Attempt is the current attempt number (1-indexed).
-	Attempt int
-
-	// Queue is the queue from which the job was fetched.
-	Queue string
-
-	// WorkflowID is set if this job is part of a workflow.
-	WorkflowID string
-
-	// ParentResults contains results from upstream workflow steps.
-	ParentResults map[string]any
-
-	// ctx is the underlying context (cancelled on worker shutdown).
-	ctx context.Context
-
-	// resultRef holds a shared reference to the job result so that
-	// SetResult works even when JobContext is passed by value.
-	resultRef *jobResultRef
-
-	// worker is a reference to the parent worker for heartbeats.
-	worker *Worker
-}
-
-// Context returns the context.Context for this job execution.
-// The context is cancelled when the worker shuts down.
-func (jc JobContext) Context() context.Context {
-	return jc.ctx
-}
-
-// SetResult sets the job's return value.
-func (jc JobContext) SetResult(result map[string]any) {
-	if jc.resultRef != nil {
-		jc.resultRef.data = result
-	}
-}
-
-// Heartbeat extends the job's visibility timeout.
-// Use this for long-running jobs to prevent them from being reclaimed.
-func (jc JobContext) Heartbeat() error {
-	if jc.worker == nil {
-		return nil
-	}
-	return jc.worker.sendHeartbeat(jc.ctx)
-}
-
-// NewJobContextForTest creates a JobContext suitable for use in tests.
-// It initialises the internal context to context.Background().
-// This is intended only for testing middleware or handlers outside a Worker.
-func NewJobContextForTest(job Job) JobContext {
-	return JobContext{
-		Job:     job,
-		Attempt: job.Attempt,
-		Queue:   job.Queue,
-		ctx:     context.Background(),
-	}
-}
+// ErrWorkerAlreadyStarted is returned by [Worker.Start] when the worker has
+// already been started. A Worker is single-use: create a new one to restart.
+var ErrWorkerAlreadyStarted = errors.New("ojs: worker already started")
 
 // Worker is an OJS worker that fetches and processes jobs from an OJS server.
 // It supports configurable concurrency, middleware, and graceful shutdown.
+//
+// This file owns worker orchestration: polling, dispatch, concurrency limits,
+// and shutdown sequencing. The worker protocol wire format lives in
+// worker_protocol.go, lifecycle transition rules in worker_state.go, and
+// in-flight job bookkeeping in worker_activejobs.go.
 type Worker struct {
 	transport *transport
 	config    workerConfig
@@ -99,10 +32,16 @@ type Worker struct {
 
 	middleware *middlewareChain
 
-	state     atomic.Value // WorkerState
-	activeJobs sync.Map   // job ID -> struct{}
-	activeCount atomic.Int64
+	lifecycle *workerLifecycle
+	active    *activeJobSet
 
+	// handlers running in their own goroutines. Tracked separately from the
+	// active job set: the set is emptied as soon as a job reports its outcome,
+	// while the goroutine itself lives a moment longer, and shutdown must not
+	// return while one is still touching worker state.
+	handlerWG sync.WaitGroup
+
+	started  atomic.Bool
 	stopOnce sync.Once
 	stopped  chan struct{}
 }
@@ -118,16 +57,16 @@ type Worker struct {
 func NewWorker(serverURL string, opts ...WorkerOption) *Worker {
 	cfg := resolveWorkerConfig(opts)
 
-	w := &Worker{
+	return &Worker{
 		transport:  newWorkerTransport(serverURL, cfg),
 		config:     cfg,
 		workerID:   generateWorkerID(),
 		handlers:   make(map[string]HandlerFunc),
 		middleware: newMiddlewareChain(),
+		lifecycle:  newWorkerLifecycle(),
+		active:     newActiveJobSet(),
 		stopped:    make(chan struct{}),
 	}
-	w.state.Store(WorkerStateRunning)
-	return w
 }
 
 // Register associates a job type with a handler function.
@@ -158,7 +97,7 @@ func (w *Worker) Register(jobType string, handler HandlerFunc) {
 //	    return err
 //	})
 func (w *Worker) Use(fn MiddlewareFunc) {
-	w.middleware.Add(fmt.Sprintf("middleware-%d", len(w.middleware.middleware)), fn)
+	w.middleware.AddAutoNamed(fn)
 }
 
 // UseNamed adds a named execution middleware to the worker's middleware chain.
@@ -169,6 +108,9 @@ func (w *Worker) UseNamed(name string, fn MiddlewareFunc) {
 // Start begins fetching and processing jobs. It blocks until the context
 // is cancelled or the worker receives a shutdown signal.
 //
+// A Worker may only be started once; subsequent calls return
+// [ErrWorkerAlreadyStarted].
+//
 // Example:
 //
 //	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM)
@@ -177,160 +119,274 @@ func (w *Worker) UseNamed(name string, fn MiddlewareFunc) {
 //	    log.Fatal(err)
 //	}
 func (w *Worker) Start(ctx context.Context) error {
-	// Validate that at least one handler is registered.
 	w.handlersMu.RLock()
-	if len(w.handlers) == 0 {
-		w.handlersMu.RUnlock()
+	registered := len(w.handlers)
+	w.handlersMu.RUnlock()
+	if registered == 0 {
 		return fmt.Errorf("ojs: no handlers registered")
 	}
-	w.handlersMu.RUnlock()
 
-	// Heartbeat uses a separate context that outlives the main ctx,
-	// so heartbeats continue during the graceful drain phase.
-	heartbeatCtx, heartbeatCancel := context.WithCancel(context.Background())
-	defer heartbeatCancel()
+	if !w.started.CompareAndSwap(false, true) {
+		return ErrWorkerAlreadyStarted
+	}
 
-	var wg sync.WaitGroup
+	// Heartbeats, ACKs and NACKs use contexts that outlive the caller's ctx so
+	// that jobs finishing during the graceful drain phase can still be reported
+	// to the server. Using the cancelled ctx here would make every drain-phase
+	// ACK/NACK fail immediately, silently re-running completed jobs.
+	detached := context.WithoutCancel(ctx)
 
-	// Start heartbeat loop.
-	wg.Add(1)
+	// reportCtx is the shutdown-surviving parent for bounded handler-driven
+	// ACK/NACK contexts. Grace expiry disables new handler claims through the
+	// active-job reporting barrier; already-claimed reports keep this live
+	// parent long enough to deliver their one terminal outcome.
+	reportCtx, stopHandlerReporting := context.WithCancel(detached)
+	defer stopHandlerReporting()
+
+	heartbeatCtx, stopHeartbeats := context.WithCancel(detached)
+	defer stopHeartbeats()
+
+	// runCtx governs fetching and handler execution. Deriving it from ctx means
+	// caller cancellation and a server-directed terminate converge on exactly
+	// one shutdown path: both cancel runCtx here and nothing else differs.
+	runCtx, stopWork := context.WithCancel(ctx)
+	defer stopWork()
+
+	var heartbeats sync.WaitGroup
+	heartbeats.Add(1)
 	go func() {
-		defer wg.Done()
+		defer heartbeats.Done()
 		w.heartbeatLoop(heartbeatCtx)
 	}()
 
-	// Start fetch loop.
-	wg.Add(1)
+	fetchStopped := make(chan struct{})
 	go func() {
-		defer wg.Done()
-		w.fetchLoop(ctx)
-	}()
-
-	// Wait for context cancellation.
-	<-ctx.Done()
-
-	// Begin graceful shutdown.
-	w.state.Store(WorkerStateTerminate)
-
-	// Wait for grace period or all active jobs to complete.
-	// Heartbeats continue during this phase so the server knows we're draining.
-	graceDone := make(chan struct{})
-	go func() {
-		w.waitForActiveJobs()
-		close(graceDone)
+		defer close(fetchStopped)
+		w.fetchLoop(runCtx, reportCtx)
 	}()
 
 	select {
-	case <-graceDone:
-		// All jobs completed within grace period.
-	case <-time.After(w.config.gracePeriod):
-		// Grace period expired. Explicitly nack remaining active jobs so the
-		// server can reschedule them immediately instead of waiting for
-		// visibility timeout.
-		w.nackActiveJobs(heartbeatCtx)
+	case <-ctx.Done():
+		// Caller-initiated shutdown.
+	case <-w.lifecycle.terminated():
+		// Server-directed terminate accepted in a heartbeat response.
 	}
 
-	// Stop heartbeats now that drain is complete or timed out.
-	heartbeatCancel()
-
-	w.stopOnce.Do(func() {
-		close(w.stopped)
+	w.shutdown(shutdownControls{
+		reportCtx:    reportCtx,
+		detached:     detached,
+		stopWork:     stopWork,
+		fetchStopped: fetchStopped,
 	})
 
-	wg.Wait()
+	// Stop heartbeats only after the drain is over: the server has to keep
+	// seeing this worker while it is draining.
+	stopHeartbeats()
+	heartbeats.Wait()
 	return nil
+}
+
+const (
+	// terminalReportTimeout bounds a handler's ACK/NACK after it has claimed
+	// the job's terminal outcome. It is independent of the cancelled handler
+	// context and prevents a claimed report from holding shutdown indefinitely.
+	terminalReportTimeout = 5 * time.Second
+
+	// forcedReportTimeout bounds the forced NACK sweep issued when the grace
+	// period expires.
+	forcedReportTimeout = 5 * time.Second
+)
+
+// shutdownControls carries the cancellation handles and join points that the
+// shutdown sequence operates on. They are grouped because they are only ever
+// used together, in a fixed order, by exactly one caller.
+type shutdownControls struct {
+	// reportCtx licenses handler-driven ACK/NACK.
+	reportCtx context.Context
+	// detached outlives the caller's context and is the parent of the bounded
+	// context used by the forced NACK sweep.
+	detached context.Context
+	// stopWork cancels fetching and handler execution.
+	stopWork context.CancelFunc
+	// fetchStopped is closed when the fetch loop goroutine has returned.
+	fetchStopped <-chan struct{}
+}
+
+// shutdown runs the graceful shutdown sequence shared by caller cancellation
+// and a server-directed terminate.
+//
+// The order is load-bearing:
+//  1. enter terminate and close the stop signal, so no further job is dispatched;
+//  2. cancel handler work and join the fetch loop, so the set of in-flight jobs
+//     is final before anything looks at it;
+//  3. drain within the grace period;
+//  4. on expiry, disable handler reporting first, then force-NACK only the jobs
+//     that have not already claimed their one terminal outcome.
+func (w *Worker) shutdown(c shutdownControls) {
+	w.lifecycle.set(WorkerStateTerminate)
+	w.stopOnce.Do(func() { close(w.stopped) })
+
+	// Cancelling runCtx is what a caller cancellation did implicitly; doing it
+	// explicitly is what makes the server-directed path identical.
+	c.stopWork()
+
+	// Join the fetch loop before taking any drain decision. While it runs it can
+	// still register a job as active, and a drain that started before it stopped
+	// could observe an empty set and declare success with a job about to start.
+	<-c.fetchStopped
+
+	if w.active.waitDrainedFor(c.reportCtx, w.config.gracePeriod) {
+		// Every job reported its own outcome; wait for the goroutines to unwind.
+		w.handlerWG.Wait()
+		return
+	}
+
+	forceCtx, cancel := context.WithTimeout(c.detached, forcedReportTimeout)
+	defer cancel()
+	w.forceNackUnreported(forceCtx)
+
+	// Reports claimed before the grace-expiry barrier are allowed to finish
+	// their one bounded ACK/NACK. Jobs whose handlers had not claimed were
+	// forced above, and later handler completions cannot claim at all.
+	w.active.waitHandlerReports()
+
+	// Remaining handlers are abandoned rather than waited on: the grace period
+	// is the contract, and a handler that ignored cancellation would otherwise
+	// hold shutdown open indefinitely. Their jobs are already NACKed above.
 }
 
 // State returns the current worker lifecycle state.
 func (w *Worker) State() WorkerState {
-	return w.state.Load().(WorkerState)
+	return w.lifecycle.current()
 }
 
 // fetchLoop is the main loop that fetches and dispatches jobs.
-func (w *Worker) fetchLoop(ctx context.Context) {
+//
+// ctx governs fetching and handler execution and is cancelled on shutdown.
+// reportCtx outlives ctx and is used only to report job outcomes, so a job that
+// finishes during the drain phase can still be ACKed or NACKed.
+func (w *Worker) fetchLoop(ctx context.Context, reportCtx context.Context) {
 	sem := make(chan struct{}, w.config.concurrency)
+
 	consecutiveErrors := 0
 
 	for {
-		select {
-		case <-ctx.Done():
+		if w.shouldStop(ctx) {
 			return
-		case <-w.stopped:
-			return
-		default:
 		}
 
-		state := w.State()
-		if state != WorkerStateRunning {
+		if w.State() != WorkerStateRunning {
 			// In quiet or terminate state, stop fetching.
-			select {
-			case <-ctx.Done():
+			if !w.pause(ctx, w.config.pollInterval) {
 				return
-			case <-w.stopped:
-				return
-			case <-time.After(w.config.pollInterval):
-				continue
 			}
+			continue
 		}
 
 		// Check if we have capacity.
-		if w.activeCount.Load() >= int64(w.config.concurrency) {
-			select {
-			case <-ctx.Done():
+		free := w.config.concurrency - w.active.count()
+		if free <= 0 {
+			if !w.pause(ctx, w.config.pollInterval) {
 				return
-			case <-time.After(w.config.pollInterval):
-				continue
 			}
+			continue
 		}
 
-		// Fetch jobs from the server.
-		count := w.config.concurrency - int(w.activeCount.Load())
-		if count <= 0 {
-			count = 1
-		}
-		jobs, err := w.fetchJobs(ctx, count)
+		jobs, err := w.fetchJobs(ctx, free)
 		if err != nil {
 			consecutiveErrors++
 			w.logWarn(ctx, "failed to fetch jobs",
 				slog.String("error", err.Error()),
 				slog.Int("consecutive_errors", consecutiveErrors),
 			)
-			select {
-			case <-ctx.Done():
+			if !w.pause(ctx, fetchBackoff(consecutiveErrors, w.config.pollInterval)) {
 				return
-			case <-time.After(fetchBackoff(consecutiveErrors, w.config.pollInterval)):
-				continue
 			}
+			continue
 		}
 
 		consecutiveErrors = 0
 
 		if len(jobs) == 0 {
 			// No jobs available, wait before polling again.
-			select {
-			case <-ctx.Done():
+			if !w.pause(ctx, w.config.pollInterval) {
 				return
-			case <-time.After(w.config.pollInterval):
-				continue
 			}
+			continue
 		}
 
-		// Dispatch each fetched job to a goroutine.
-		for _, job := range jobs {
-			job := job // capture loop variable
-			sem <- struct{}{}
-			w.activeJobs.Store(job.ID, struct{}{})
-			w.activeCount.Add(1)
+		if !w.dispatch(ctx, reportCtx, sem, jobs) {
+			return
+		}
+	}
+}
 
-			go func() {
-				defer func() {
-					<-sem
-					w.activeJobs.Delete(job.ID)
-					w.activeCount.Add(-1)
-				}()
-				w.processJob(ctx, job)
+// dispatch hands each fetched job to a goroutine, blocking on the concurrency
+// semaphore. It reports false if the worker was asked to stop while waiting for
+// a slot, in which case the undispatched jobs are left for the server to
+// reclaim via visibility timeout.
+func (w *Worker) dispatch(ctx, reportCtx context.Context, sem chan struct{}, jobs []Job) bool {
+	// Indexed rather than ranged by value: a Job envelope is 256 bytes and the
+	// only copy that has to exist is the one JobContext owns.
+	for i := range jobs {
+		job := &jobs[i]
+
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return false
+		case <-w.stopped:
+			return false
+		}
+
+		// Re-check after acquiring the slot and before registering the job as
+		// active: waiting for a slot can take arbitrarily long, and a job that
+		// is registered or started after shutdown began would either miss the
+		// drain snapshot or start work the worker has already promised not to
+		// start. Fetched-but-undispatched jobs are simply left for the server to
+		// reclaim via the visibility timeout, exactly as an unfetched job is.
+		if w.shouldStop(ctx) {
+			<-sem
+			return false
+		}
+
+		guard := w.active.add(job.ID)
+		w.handlerWG.Add(1)
+		go func() {
+			defer func() {
+				w.active.remove(job.ID)
+				<-sem
+				w.handlerWG.Done()
 			}()
-		}
+			w.processJob(ctx, reportCtx, job, guard)
+		}()
+	}
+	return true
+}
+
+// shouldStop reports whether the fetch loop must exit now.
+func (w *Worker) shouldStop(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return true
+	case <-w.stopped:
+		return true
+	default:
+		return false
+	}
+}
+
+// pause waits for d, returning false if the worker must stop instead.
+func (w *Worker) pause(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-w.stopped:
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -353,16 +409,25 @@ func fetchBackoff(consecutiveErrors int, base time.Duration) time.Duration {
 }
 
 // processJob executes a single job through the middleware chain and handler.
-func (w *Worker) processJob(ctx context.Context, job Job) {
+// ctx is the handler-visible context; reportCtx is used to report the outcome
+// and survives worker shutdown. guard licenses the single terminal ACK/NACK
+// this job is allowed to produce; a nil guard means the caller did not register
+// the job and reporting is unrestricted.
+func (w *Worker) processJob(ctx, reportCtx context.Context, job *Job, guard *reportGuard) {
 	w.handlersMu.RLock()
 	handler, ok := w.handlers[job.Type]
 	w.handlersMu.RUnlock()
 
 	if !ok {
 		// No handler registered for this job type. NACK it as non-retryable.
-		if nackErr := w.nackJob(ctx, job.ID, "handler_error",
+		terminalCtx, finishReport, claimed := w.claimTerminalReport(reportCtx, guard)
+		if !claimed {
+			return
+		}
+		defer finishReport()
+		if nackErr := w.nackHandlerErrorWithRetry(terminalCtx, job.ID,
 			fmt.Sprintf("no handler registered for job type %q", job.Type), false); nackErr != nil {
-			w.logError(ctx, "failed to nack unhandled job",
+			w.logError(terminalCtx, "failed to nack unhandled job",
 				slog.String("job.id", job.ID),
 				slog.String("job.type", job.Type),
 				slog.String("error", nackErr.Error()),
@@ -373,7 +438,7 @@ func (w *Worker) processJob(ctx context.Context, job Job) {
 
 	ref := &jobResultRef{}
 	jctx := JobContext{
-		Job:       job,
+		Job:       *job,
 		Attempt:   job.Attempt,
 		Queue:     job.Queue,
 		ctx:       ctx,
@@ -381,30 +446,25 @@ func (w *Worker) processJob(ctx context.Context, job Job) {
 		worker:    w,
 	}
 
-	// Build the middleware chain around the handler.
-	wrapped := w.middleware.then(handler)
+	err := w.runHandler(ctx, &jctx, handler)
 
-	// Execute with panic recovery to prevent a single handler crash from
-	// taking down the entire worker process.
-	var err error
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				err = fmt.Errorf("panic in job handler: %v", r)
-				w.logError(ctx, "job handler panicked",
-					slog.String("job.id", job.ID),
-					slog.String("job.type", job.Type),
-					slog.Any("panic", r),
-				)
-			}
-		}()
-		err = wrapped(jctx)
-	}()
+	// The outcome is decided; claim the job's one terminal report. Losing the
+	// claim means the shutdown sweep already NACKed this job, so reporting again
+	// would contradict what the server has already been told.
+	terminalCtx, finishReport, claimed := w.claimTerminalReport(reportCtx, guard)
+	if !claimed {
+		w.logWarn(reportCtx, "job outcome discarded: terminal outcome already reported",
+			slog.String("job.id", job.ID),
+			slog.String("job.type", job.Type),
+		)
+		return
+	}
+	defer finishReport()
 
 	if err != nil {
 		// Job failed. NACK it, respecting the error's retryability signal.
-		if nackErr := w.nackJobWithRetry(ctx, job.ID, "handler_error", err.Error(), isHandlerRetryable(err)); nackErr != nil {
-			w.logError(ctx, "failed to nack job after retries",
+		if nackErr := w.nackHandlerErrorWithRetry(terminalCtx, job.ID, err.Error(), isHandlerRetryable(err)); nackErr != nil {
+			w.logError(terminalCtx, "failed to nack job after retries",
 				slog.String("job.id", job.ID),
 				slog.String("job.type", job.Type),
 				slog.String("error", nackErr.Error()),
@@ -414,8 +474,8 @@ func (w *Worker) processJob(ctx context.Context, job Job) {
 	}
 
 	// Job succeeded. ACK it.
-	if ackErr := w.ackJobWithRetry(ctx, job.ID, ref.data); ackErr != nil {
-		w.logError(ctx, "failed to ack job after retries",
+	if ackErr := w.ackJobWithRetry(terminalCtx, job.ID, ref.data); ackErr != nil {
+		w.logError(terminalCtx, "failed to ack job after retries",
 			slog.String("job.id", job.ID),
 			slog.String("job.type", job.Type),
 			slog.String("error", ackErr.Error()),
@@ -423,55 +483,33 @@ func (w *Worker) processJob(ctx context.Context, job Job) {
 	}
 }
 
-// fetchJobs fetches jobs from the OJS server.
-func (w *Worker) fetchJobs(ctx context.Context, count int) ([]Job, error) {
-	req := struct {
-		Queues   []string `json:"queues"`
-		Count    int      `json:"count"`
-		WorkerID string   `json:"worker_id"`
-	}{
-		Queues:   w.config.queues,
-		Count:    count,
-		WorkerID: w.workerID,
+// claimTerminalReport acquires the handler side of a job's terminal-report
+// guard and gives the winner a shutdown-surviving but bounded context.
+func (w *Worker) claimTerminalReport(parent context.Context, guard *reportGuard) (context.Context, func(), bool) {
+	if !w.active.claimForHandler(guard) {
+		return nil, nil, false
 	}
-
-	var resp struct {
-		Jobs []Job `json:"jobs"`
-	}
-	if err := w.transport.post(ctx, basePath+"/workers/fetch", req, &resp); err != nil {
-		return nil, err
-	}
-	return resp.Jobs, nil
+	ctx, cancel := context.WithTimeout(parent, terminalReportTimeout)
+	return ctx, func() {
+		cancel()
+		w.active.finishHandlerReport(guard)
+	}, true
 }
 
-// ackJob acknowledges successful completion of a job.
-func (w *Worker) ackJob(ctx context.Context, jobID string, result map[string]any) error {
-	req := struct {
-		JobID  string         `json:"job_id"`
-		Result map[string]any `json:"result,omitempty"`
-	}{
-		JobID:  jobID,
-		Result: result,
-	}
-	return w.transport.post(ctx, basePath+"/workers/ack", req, nil)
-}
-
-// nackJob reports job failure to the OJS server.
-func (w *Worker) nackJob(ctx context.Context, jobID, code, message string, retryable bool) error {
-	req := struct {
-		JobID string `json:"job_id"`
-		Error struct {
-			Code      string `json:"code"`
-			Message   string `json:"message"`
-			Retryable bool   `json:"retryable"`
-		} `json:"error"`
-	}{
-		JobID: jobID,
-	}
-	req.Error.Code = code
-	req.Error.Message = message
-	req.Error.Retryable = retryable
-	return w.transport.post(ctx, basePath+"/workers/nack", req, nil)
+// runHandler invokes the middleware chain and handler with panic recovery, so a
+// single handler crash cannot take down the worker process.
+func (w *Worker) runHandler(ctx context.Context, jctx *JobContext, handler HandlerFunc) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic in job handler: %v", r)
+			w.logError(ctx, "job handler panicked",
+				slog.String("job.id", jctx.Job.ID),
+				slog.String("job.type", jctx.Job.Type),
+				slog.Any("panic", r),
+			)
+		}
+	}()
+	return w.middleware.then(handler)(*jctx)
 }
 
 // heartbeatLoop sends periodic heartbeats to the OJS server.
@@ -482,8 +520,6 @@ func (w *Worker) heartbeatLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
-		case <-w.stopped:
 			return
 		case <-ticker.C:
 			if err := w.sendHeartbeat(ctx); err != nil {
@@ -496,84 +532,63 @@ func (w *Worker) heartbeatLoop(ctx context.Context) {
 	}
 }
 
-// sendHeartbeat sends a single heartbeat to the OJS server.
-func (w *Worker) sendHeartbeat(ctx context.Context) error {
-	activeJobIDs := w.getActiveJobIDs()
+// forcedNACKConcurrency caps the number of concurrent NACK requests during
+// the forced shutdown sweep. This ensures progress even if one NACK hangs,
+// while avoiding overwhelming the server or exhausting connections.
+const forcedNACKConcurrency = 10
 
-	req := struct {
-		WorkerID   string   `json:"worker_id"`
-		State      string   `json:"state"`
-		ActiveJobs int      `json:"active_jobs"`
-		ActiveJobIDs []string `json:"active_job_ids"`
-	}{
-		WorkerID:     w.workerID,
-		State:        string(w.State()),
-		ActiveJobs:   len(activeJobIDs),
-		ActiveJobIDs: activeJobIDs,
+// forceNackUnreported nacks every in-flight job that has not already claimed a
+// terminal outcome, so the server can reschedule it immediately instead of
+// waiting for the visibility timeout. Called when the grace period expires.
+//
+// A fixed worker pool sends NACKs under the shared ctx deadline. Every claimed
+// job is handed to nackJob exactly once; if one request hangs, the remaining
+// workers continue draining the queue. Jobs whose handler already claimed
+// their report were skipped upstream by disableReportingAndClaimUnreported.
+//
+// Errors are collected by sorted job index and logged in deterministic job-ID
+// order after all workers finish, avoiding interleaved concurrent log output.
+func (w *Worker) forceNackUnreported(ctx context.Context) {
+	ids := w.active.disableReportingAndClaimUnreported()
+	if len(ids) == 0 {
+		return
 	}
 
-	var resp struct {
-		State string `json:"state"`
-	}
-	if err := w.transport.post(ctx, basePath+"/workers/heartbeat", req, &resp); err != nil {
-		// Heartbeat failures are non-fatal. Continue operating.
-		return err
+	type nackError struct {
+		jobID string
+		err   error
 	}
 
-	// Process server-directed state changes.
-	if resp.State != "" {
-		w.handleServerState(WorkerState(resp.State))
+	results := make([]nackError, len(ids))
+	jobs := make(chan int, len(ids))
+	for i := range ids {
+		jobs <- i
 	}
+	close(jobs)
 
-	return nil
-}
-
-// handleServerState processes a state directive from the server.
-func (w *Worker) handleServerState(desired WorkerState) {
-	current := w.State()
-	switch {
-	case current == WorkerStateRunning && desired == WorkerStateQuiet:
-		w.state.Store(WorkerStateQuiet)
-	case current == WorkerStateRunning && desired == WorkerStateTerminate:
-		w.state.Store(WorkerStateTerminate)
-	case current == WorkerStateQuiet && desired == WorkerStateTerminate:
-		w.state.Store(WorkerStateTerminate)
-	case current == WorkerStateQuiet && desired == WorkerStateRunning:
-		w.state.Store(WorkerStateRunning)
+	workerCount := min(forcedNACKConcurrency, len(ids))
+	var wg sync.WaitGroup
+	wg.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				jobID := ids[idx]
+				if err := w.nackJob(ctx, jobID, "worker_shutdown",
+					"worker shutting down: grace period expired", true); err != nil {
+					results[idx] = nackError{jobID, err}
+				}
+			}
+		}()
 	}
-	// Backward transitions from terminate are not allowed.
-}
+	wg.Wait()
 
-// getActiveJobIDs returns the IDs of all currently active jobs.
-func (w *Worker) getActiveJobIDs() []string {
-	var ids []string
-	w.activeJobs.Range(func(key, _ any) bool {
-		ids = append(ids, key.(string))
-		return true
-	})
-	if ids == nil {
-		ids = []string{}
-	}
-	return ids
-}
-
-// waitForActiveJobs blocks until all active jobs have completed.
-func (w *Worker) waitForActiveJobs() {
-	for w.activeCount.Load() > 0 {
-		time.Sleep(100 * time.Millisecond)
-	}
-}
-
-// nackActiveJobs nacks all currently active jobs so the server can reschedule
-// them immediately. Called when the grace period expires during shutdown.
-func (w *Worker) nackActiveJobs(ctx context.Context) {
-	ids := w.getActiveJobIDs()
-	for _, id := range ids {
-		if err := w.nackJob(ctx, id, "worker_shutdown",
-			"worker shutting down: grace period expired", true); err != nil {
+	// Log errors deterministically (ids are already sorted).
+	for _, r := range results {
+		if r.err != nil {
 			w.logError(ctx, "failed to nack job during shutdown",
-				slog.String("job.id", id),
-				slog.String("error", err.Error()),
+				slog.String("job.id", r.jobID),
+				slog.String("error", r.err.Error()),
 			)
 		}
 	}
@@ -581,7 +596,10 @@ func (w *Worker) nackActiveJobs(ctx context.Context) {
 
 // generateWorkerID generates a unique worker identifier.
 func generateWorkerID() string {
-	hostname, _ := os.Hostname()
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		hostname = "unknown"
+	}
 	return fmt.Sprintf("worker_%s_%d_%d", hostname, os.Getpid(), time.Now().UnixNano())
 }
 
@@ -601,48 +619,49 @@ func (w *Worker) logWarn(ctx context.Context, msg string, attrs ...slog.Attr) {
 
 const ackNackMaxRetries = 3
 
-// ackJobWithRetry retries ACK up to ackNackMaxRetries times with brief pauses.
-func (w *Worker) ackJobWithRetry(ctx context.Context, jobID string, result map[string]any) error {
+// ackNackRetryDelay is the pause before retry attempt n (0-indexed).
+func ackNackRetryDelay(attempt int) time.Duration {
+	return time.Duration(attempt+1) * 500 * time.Millisecond
+}
+
+// retryReport runs a report call (ACK or NACK) up to ackNackMaxRetries times.
+func (w *Worker) retryReport(ctx context.Context, jobID, op string, call func() error) error {
 	var lastErr error
 	for attempt := 0; attempt < ackNackMaxRetries; attempt++ {
-		if err := w.ackJob(ctx, jobID, result); err != nil {
-			lastErr = err
-			w.logWarn(ctx, "ack attempt failed, retrying",
-				slog.String("job.id", jobID),
-				slog.Int("attempt", attempt+1),
-				slog.String("error", err.Error()),
-			)
-			select {
-			case <-ctx.Done():
-				return lastErr
-			case <-time.After(time.Duration(attempt+1) * 500 * time.Millisecond):
-			}
-			continue
+		err := call()
+		if err == nil {
+			return nil
 		}
-		return nil
+		lastErr = err
+		w.logWarn(ctx, op+" attempt failed, retrying",
+			slog.String("job.id", jobID),
+			slog.Int("attempt", attempt+1),
+			slog.String("error", err.Error()),
+		)
+		select {
+		case <-ctx.Done():
+			return lastErr
+		case <-time.After(ackNackRetryDelay(attempt)):
+		}
 	}
 	return lastErr
 }
 
-// nackJobWithRetry retries NACK up to ackNackMaxRetries times with brief pauses.
-func (w *Worker) nackJobWithRetry(ctx context.Context, jobID, code, message string, retryable bool) error {
-	var lastErr error
-	for attempt := 0; attempt < ackNackMaxRetries; attempt++ {
-		if err := w.nackJob(ctx, jobID, code, message, retryable); err != nil {
-			lastErr = err
-			w.logWarn(ctx, "nack attempt failed, retrying",
-				slog.String("job.id", jobID),
-				slog.Int("attempt", attempt+1),
-				slog.String("error", err.Error()),
-			)
-			select {
-			case <-ctx.Done():
-				return lastErr
-			case <-time.After(time.Duration(attempt+1) * 500 * time.Millisecond):
-			}
-			continue
-		}
-		return nil
-	}
-	return lastErr
+// ackJobWithRetry retries ACK up to ackNackMaxRetries times with brief pauses.
+func (w *Worker) ackJobWithRetry(ctx context.Context, jobID string, result map[string]any) error {
+	return w.retryReport(ctx, jobID, "ack", func() error {
+		return w.ackJob(ctx, jobID, result)
+	})
+}
+
+// nackHandlerErrorWithRetry reports a handler failure, retrying up to
+// ackNackMaxRetries times with brief pauses.
+//
+// The shutdown path deliberately uses the non-retrying nackJob instead: the
+// grace period has already expired there, so retrying would extend shutdown
+// once per remaining job.
+func (w *Worker) nackHandlerErrorWithRetry(ctx context.Context, jobID, message string, retryable bool) error {
+	return w.retryReport(ctx, jobID, "nack", func() error {
+		return w.nackJob(ctx, jobID, ErrCodeHandlerError, message, retryable)
+	})
 }

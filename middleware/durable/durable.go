@@ -141,9 +141,16 @@ func Middleware(store Store) ojs.MiddlewareFunc {
 }
 
 // FromContext retrieves the DurableContext for the current job.
+//
+// When the job was not run through [Middleware] — or the registry entry was
+// somehow written by something else — a no-op context is returned rather than
+// panicking on a bad type assertion, so a handler that opportunistically asks
+// for durability still runs.
 func FromContext(ctx ojs.JobContext) *DurableContext {
-	if dc, ok := registry.Load(ctx.Job.ID); ok {
-		return dc.(*DurableContext)
+	if v, ok := registry.Load(ctx.Job.ID); ok {
+		if dc, ok := v.(*DurableContext); ok {
+			return dc
+		}
 	}
 	return &DurableContext{store: &noopStore{}}
 }

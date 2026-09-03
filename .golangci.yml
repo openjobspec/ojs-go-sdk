@@ -26,10 +26,42 @@ linters-settings:
     enabled-tags:
       - diagnostic
       - performance
+    # Narrow, deliberate policy exception — the rest of the `performance` tag
+    # (rangeValCopy, appendCombine, sloppyReassign, ...) stays enabled and is
+    # enforced to zero findings.
+    #
+    # `hugeParam` asks for a pointer receiver/parameter wherever a struct is
+    # larger than 80 bytes. The OJS Go SDK's *published* surface is deliberately
+    # value-based, so acting on it would be a breaking API change:
+    #
+    #   * `HandlerFunc func(JobContext) error` and `MiddlewareFunc` — the handler
+    #     contract every user of the SDK implements. `JobContext` is 336 bytes.
+    #   * `Attestor.Attest(context.Context, AttestInput)` /
+    #     `Attestor.Verify(context.Context, Receipt)` — an interface method set;
+    #     changing it breaks every third-party implementation.
+    #   * The fluent builders `MLResources.WithX() MLResources`,
+    #     `WorkflowDefinition.Validate()`, `Client.CreateWorkflow(..., def
+    #     WorkflowDefinition, ...)`, `WithMLResources(MLResources)`,
+    #     `WithWorkerCapabilities(WorkerCapabilities)`, `ml.WithModel(
+    #     ModelReference)` — value semantics are the point: callers rely on the
+    #     copy so a shared definition cannot be mutated by a callee.
+    #
+    # Unexported helpers that could take a pointer without an API impact were
+    # converted instead of relying on this exception.
+    disabled-checks:
+      - hugeParam
   gocyclo:
     min-complexity: 15
 
 issues:
+  # Report every finding. The defaults (max-issues-per-linter: 50,
+  # max-same-issues: 3) silently truncate the report, so a run can look clean
+  # while findings are being withheld — the gocritic count was pinned at exactly
+  # 50 for that reason. A gate that cannot be trusted to be complete is not a
+  # gate.
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
   exclude-rules:
     - path: _test\.go
       linters:

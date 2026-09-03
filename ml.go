@@ -208,7 +208,28 @@ func (r MLResources) WithDistributedStrategy(strategy string) MLResources {
 }
 
 // Validate checks that resource requirements are logically consistent.
+//
+// The rules fall into five independent questions, each of which can be decided
+// without reference to the others. They are evaluated in their original order so
+// a request that breaks several rules still reports the same first failure.
 func (r MLResources) Validate() error {
+	if err := r.validateDeviceQuantities(); err != nil {
+		return err
+	}
+	if err := r.validateGPURequirements(); err != nil {
+		return err
+	}
+	if err := r.validateTPURequirements(); err != nil {
+		return err
+	}
+	if err := r.validateExecutionLimits(); err != nil {
+		return err
+	}
+	return r.validateAcceleratorConsistency()
+}
+
+// validateDeviceQuantities rejects hardware amounts that cannot be provisioned.
+func (r MLResources) validateDeviceQuantities() error {
 	if r.GPUCount < 0 {
 		return fmt.Errorf("ojs: gpu_count must be non-negative, got %d", r.GPUCount)
 	}
@@ -227,6 +248,12 @@ func (r MLResources) Validate() error {
 	if r.ShmSizeGB < 0 {
 		return fmt.Errorf("ojs: shm_size_gb must be non-negative, got %f", r.ShmSizeGB)
 	}
+	return nil
+}
+
+// validateGPURequirements rejects GPU-qualifying attributes that were requested
+// without enough GPUs to apply them to.
+func (r MLResources) validateGPURequirements() error {
 	if r.GPUMemoryGB > 0 && r.GPUCount == 0 {
 		return fmt.Errorf("ojs: gpu_memory_gb requires gpu_count > 0")
 	}
@@ -239,12 +266,22 @@ func (r MLResources) Validate() error {
 	if r.GPUInterconnect != "" && r.GPUCount < 2 {
 		return fmt.Errorf("ojs: gpu_interconnect requires gpu_count >= 2")
 	}
+	return nil
+}
+
+// validateTPURequirements rejects an internally inconsistent TPU request.
+func (r MLResources) validateTPURequirements() error {
 	if r.TPUChipCount < 0 {
 		return fmt.Errorf("ojs: tpu_chip_count must be non-negative, got %d", r.TPUChipCount)
 	}
 	if r.TPUTopology != "" && r.TPUType == "" {
 		return fmt.Errorf("ojs: tpu_topology requires tpu_type to be set")
 	}
+	return nil
+}
+
+// validateExecutionLimits rejects negative per-job execution budgets.
+func (r MLResources) validateExecutionLimits() error {
 	if r.MaxTokens < 0 {
 		return fmt.Errorf("ojs: max_tokens must be non-negative, got %d", r.MaxTokens)
 	}
@@ -254,15 +291,18 @@ func (r MLResources) Validate() error {
 	if r.TimeoutSeconds < 0 {
 		return fmt.Errorf("ojs: timeout_seconds must be non-negative, got %d", r.TimeoutSeconds)
 	}
+	return nil
+}
 
-	// Validate accelerator consistency
+// validateAcceleratorConsistency rejects a declared accelerator that contradicts
+// the devices actually requested.
+func (r MLResources) validateAcceleratorConsistency() error {
 	if r.Accelerator == "tpu" && r.GPUCount > 0 {
 		return fmt.Errorf("ojs: accelerator=tpu is incompatible with gpu_count > 0")
 	}
 	if r.Accelerator == "cpu" && (r.GPUCount > 0 || r.TPUChipCount > 0) {
 		return fmt.Errorf("ojs: accelerator=cpu is incompatible with gpu_count or tpu_chip_count > 0")
 	}
-
 	return nil
 }
 

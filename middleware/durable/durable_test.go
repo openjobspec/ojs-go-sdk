@@ -138,3 +138,44 @@ func TestExpiredCheckpoint(t *testing.T) {
 		t.Error("expected expired checkpoint to not be found")
 	}
 }
+
+// FromContext used an unchecked type assertion on the registry entry, so any
+// value that was not a *DurableContext panicked inside the handler goroutine.
+// A wrong entry now degrades to the no-op context, exactly like a missing one.
+func TestFromContextIgnoresForeignRegistryEntry(t *testing.T) {
+	const jobID = "foreign-entry"
+	registry.Store(jobID, "not a durable context")
+	t.Cleanup(func() { registry.Delete(jobID) })
+
+	dc := FromContext(ojs.JobContext{Job: ojs.Job{ID: jobID}})
+	if dc == nil {
+		t.Fatal("FromContext returned nil")
+	}
+	if err := dc.Save(map[string]int{"x": 1}, 1); err != nil {
+		t.Errorf("noop save should not error: %v", err)
+	}
+	if _, ok := dc.Restore(&map[string]int{}); ok {
+		t.Error("noop restore should return false")
+	}
+}
+
+// The happy path must still hand back the context the middleware registered.
+func TestFromContextReturnsRegisteredContext(t *testing.T) {
+	store := NewMemoryStore(time.Hour)
+	jctx := ojs.NewJobContextForTest(ojs.Job{ID: "registered"})
+
+	var got *DurableContext
+	err := Middleware(store)(jctx, func(inner ojs.JobContext) error {
+		got = FromContext(inner)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("middleware returned %v", err)
+	}
+	if got == nil || got.jobID != "registered" {
+		t.Fatalf("FromContext returned %#v, want the registered context for job %q", got, "registered")
+	}
+	if got.store != store {
+		t.Error("FromContext returned a context that is not backed by the middleware's store")
+	}
+}

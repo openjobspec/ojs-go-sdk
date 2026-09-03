@@ -22,7 +22,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -89,10 +88,13 @@ type RegionConfig struct {
 // FederationConfig holds the complete declarative configuration for a
 // federated client. Use NewFromConfig to create a FederatedClient from it.
 type FederationConfig struct {
-	Regions          []RegionConfig
-	LocalRegion      string
-	RoutingPolicy    RoutingPolicy
-	HealthInterval   time.Duration
+	Regions        []RegionConfig
+	LocalRegion    string
+	RoutingPolicy  RoutingPolicy
+	HealthInterval time.Duration
+	// FailureThreshold is the number of consecutive failures before opening a
+	// region's circuit breaker. Zero uses DefaultFailureThreshold; negative
+	// values are invalid.
 	FailureThreshold int
 	CooldownPeriod   time.Duration
 }
@@ -132,18 +134,30 @@ type RoutingStrategy interface {
 	Select(ctx context.Context, regions map[string]*regionState, localRegion string) (string, error)
 }
 
-// generateFederationID produces a time-ordered unique ID.
-// In production, this should be UUIDv7. Here we use a timestamp-based
-// approach for zero external dependencies.
+// generateFederationID produces a time-ordered unique ID in the UUIDv7 layout
+// of RFC 9562 section 5.7: a 48-bit big-endian Unix millisecond timestamp, the
+// version nibble, the variant bits, and 74 bits from the system CSPRNG.
+//
+// It is built byte-wise from a single 16-byte buffer rather than from packed
+// integer fields. That keeps every field width exact — the previous form
+// narrowed a 64-bit clock and a 32-bit nanosecond count into uint32/uint16
+// without bounding them — and it takes the entropy from crypto/rand, because a
+// federation ID identifies a job across regions and must not be guessable.
+//
+// It remains dependency-free: only the standard library is used.
 func generateFederationID() string {
-	now := time.Now()
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
-		uint32(now.Unix()),
-		uint16(now.Nanosecond()>>16),
-		0x7000|uint16(now.Nanosecond()&0x0FFF),
-		0x8000|uint16(rand.Intn(0x3FFF)),
-		rand.Int63()&0xFFFFFFFFFFFF,
-	)
+	// Low 48 bits of the Unix millisecond clock. Masking keeps the value
+	// non-negative and exactly 48 bits wide without narrowing a 64-bit clock
+	// into a uint32, which is what the previous form did.
+	ms := time.Now().UnixMilli() & 0xFFFFFFFFFFFF
+
+	var rnd [10]byte
+	randBytes(rnd[:])
+	rnd[0] = (rnd[0] & 0x0F) | 0x70 // version 7
+	rnd[2] = (rnd[2] & 0x3F) | 0x80 // variant 0b10
+
+	return fmt.Sprintf("%08x-%04x-%x-%x-%x",
+		ms>>16, ms&0xFFFF, rnd[0:2], rnd[2:4], rnd[4:10])
 }
 
 // NewHTTPClient is a convenience function that creates an *http.Client

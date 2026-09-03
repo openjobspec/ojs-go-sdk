@@ -67,7 +67,7 @@ flowchart LR
 ## Installation
 
 ```bash
-go get github.com/openjobspec/ojs-go-sdk
+go get github.com/openjobspec/ojs-go-sdk@v0.5.0
 ```
 
 ## Quick Start
@@ -202,7 +202,7 @@ The `middleware/otel` package provides native OpenTelemetry tracing and metrics
 (separate Go module to keep the core dependency-free):
 
 ```bash
-go get github.com/openjobspec/ojs-go-sdk/middleware/otel
+go get github.com/openjobspec/ojs-go-sdk/middleware/otel@v0.5.0
 ```
 
 ```go
@@ -267,7 +267,7 @@ wf, err := client.CreateWorkflow(ctx, ojs.Chain(
     ojs.Step{Type: "data.transform", Args: ojs.Args{"format": "csv"}},
 ))
 
-// Group: parallel jobs.
+// Group: one or more jobs (parallel when multiple jobs are present).
 wf, err := client.CreateWorkflow(ctx, ojs.Group(
     ojs.Step{Type: "export.csv", Args: ojs.Args{"id": "rpt_1"}},
     ojs.Step{Type: "export.pdf", Args: ojs.Args{"id": "rpt_1"}},
@@ -282,6 +282,24 @@ wf, err := client.CreateWorkflow(ctx, ojs.Batch(
     ojs.Step{Type: "email.send", Args: ojs.Args{"to": "user1@example.com"}},
     ojs.Step{Type: "email.send", Args: ojs.Args{"to": "user2@example.com"}},
 ))
+
+// WorkflowDefinition.Options supplies defaults. Standard enqueue options are
+// sent in the workflow options object; metadata is merged into every job and
+// callback because workflow-root meta is not part of the OJS workflow schema.
+def := ojs.Chain(
+    ojs.Step{
+        Type: "report.generate",
+        Args: ojs.Args{},
+        Options: []ojs.EnqueueOption{
+            ojs.WithMeta(map[string]any{"locale": "de-DE"}), // overrides by key
+        },
+    },
+)
+def.Options = []ojs.EnqueueOption{
+    ojs.WithQueue("reports"),
+    ojs.WithMeta(map[string]any{"tenant_id": "acme", "locale": "en-US"}),
+}
+wf, err = client.CreateWorkflow(ctx, def)
 ```
 
 ## Error Handling
@@ -399,6 +417,3 @@ This SDK implements the [OJS v1.0](https://openjobspec.org) specification:
 ## License
 
 Apache 2.0 -- see [LICENSE](LICENSE).
-
-
-

@@ -16,19 +16,19 @@ type Queue struct {
 
 // QueueStats represents detailed statistics for a queue.
 type QueueStats struct {
-	Queue              string  `json:"queue"`
-	Status             string  `json:"status"`
-	Available          int     `json:"available"`
-	Active             int     `json:"active"`
-	Scheduled          int     `json:"scheduled"`
-	Retryable          int     `json:"retryable"`
-	Discarded          int     `json:"discarded"`
-	CompletedLastHour  int     `json:"completed_last_hour"`
-	FailedLastHour     int     `json:"failed_last_hour"`
-	AvgDurationMS      float64 `json:"avg_duration_ms"`
-	AvgWaitMS          float64 `json:"avg_wait_ms"`
-	ThroughputPerSec   float64 `json:"throughput_per_second"`
-	ComputedAt         string  `json:"computed_at"`
+	Queue             string  `json:"queue"`
+	Status            string  `json:"status"`
+	Available         int     `json:"available"`
+	Active            int     `json:"active"`
+	Scheduled         int     `json:"scheduled"`
+	Retryable         int     `json:"retryable"`
+	Discarded         int     `json:"discarded"`
+	CompletedLastHour int     `json:"completed_last_hour"`
+	FailedLastHour    int     `json:"failed_last_hour"`
+	AvgDurationMS     float64 `json:"avg_duration_ms"`
+	AvgWaitMS         float64 `json:"avg_wait_ms"`
+	ThroughputPerSec  float64 `json:"throughput_per_second"`
+	ComputedAt        string  `json:"computed_at"`
 }
 
 // Pagination contains pagination metadata for list endpoints.
@@ -92,13 +92,19 @@ func (c *Client) GetQueueStats(ctx context.Context, name string) (*QueueStats, e
 }
 
 // PauseQueue pauses a queue, preventing workers from fetching new jobs.
+//
+// This uses postIdempotent rather than post: pausing an already-paused queue
+// reaches the same end state, so it is safe for the transport to retry
+// automatically on a transient error where a create/reserve/append operation
+// would not be.
 func (c *Client) PauseQueue(ctx context.Context, name string) error {
 	path := fmt.Sprintf("%s/queues/%s/pause", basePath, url.PathEscape(name))
-	return c.transport.post(ctx, path, nil, nil)
+	return c.transport.postIdempotent(ctx, path, nil, nil)
 }
 
-// ResumeQueue resumes a paused queue.
+// ResumeQueue resumes a paused queue. See PauseQueue for why this is eligible
+// for automatic retry despite using POST.
 func (c *Client) ResumeQueue(ctx context.Context, name string) error {
 	path := fmt.Sprintf("%s/queues/%s/resume", basePath, url.PathEscape(name))
-	return c.transport.post(ctx, path, nil, nil)
+	return c.transport.postIdempotent(ctx, path, nil, nil)
 }

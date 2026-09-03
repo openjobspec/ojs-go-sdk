@@ -48,7 +48,14 @@ func TestReportProgress(t *testing.T) {
 }
 
 func TestReportProgressValidation(t *testing.T) {
-	tr := newTransport("http://localhost:9999", clientConfig{})
+	// Retries are disabled so the "valid" case's expected connection error
+	// (there is no server at this address) is returned promptly instead of
+	// being retried per the transport's now method/operation-aware retry
+	// classification -- progress reporting is a POST with no idempotency key,
+	// so it would not be retried automatically in production either, but this
+	// keeps the test's timing intent (fail fast, do not wait out a backoff
+	// schedule) explicit rather than incidental.
+	tr := newTransport("http://localhost:9999", clientConfig{retryConfig: &RetryConfig{Enabled: false}})
 
 	tests := []struct {
 		name    string

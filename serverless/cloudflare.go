@@ -2,7 +2,6 @@ package serverless
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"time"
@@ -36,6 +35,36 @@ func WithCloudflareTimeout(d time.Duration) CloudflareOption {
 func WithCloudflareMaxBodySize(n int64) CloudflareOption {
 	return func(h *CloudflareHandler) {
 		h.inner.maxBodySize = n
+	}
+}
+
+// WithCloudflareHandlerOptions applies shared HTTP push authentication settings.
+func WithCloudflareHandlerOptions(options HandlerOptions) CloudflareOption {
+	return func(h *CloudflareHandler) {
+		h.inner.applyHandlerOptions(options)
+	}
+}
+
+// WithCloudflarePushSigningSecrets replaces the secrets accepted for OJS HTTP
+// push signatures.
+func WithCloudflarePushSigningSecrets(secrets ...string) CloudflareOption {
+	return func(h *CloudflareHandler) {
+		h.inner.setPushSigningSecrets(secrets)
+	}
+}
+
+// WithCloudflarePushFreshnessWindow sets the permitted timestamp clock skew.
+func WithCloudflarePushFreshnessWindow(window time.Duration) CloudflareOption {
+	return func(h *CloudflareHandler) {
+		h.inner.pushFreshnessWindow = window
+	}
+}
+
+// WithCloudflareInsecureAllowUnsignedPushForLocalDevelopment disables HTTP
+// push authentication. It must only be used for local development and tests.
+func WithCloudflareInsecureAllowUnsignedPushForLocalDevelopment() CloudflareOption {
+	return func(h *CloudflareHandler) {
+		h.inner.insecureAllowUnsignedPushForLocalDevelopment = true
 	}
 }
 
@@ -89,58 +118,9 @@ func (h *CloudflareHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Unlike ServeHTTP (which expects PushDeliveryRequest wrapping), this method
 // reads the job directly from the request body.
 func (h *CloudflareHandler) HandleFetchEvent(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	body := http.MaxBytesReader(w, r.Body, h.inner.maxBodySize)
-	var job JobEvent
-	if err := json.NewDecoder(body).Decode(&job); err != nil {
-		writeJSON(w, http.StatusBadRequest, PushDeliveryResponse{
-			Status: "failed",
-			Error: &PushError{
-				Code:    "invalid_request",
-				Message: "failed to decode job event",
-			},
-		})
-		return
-	}
-
-	if job.ID == "" || job.Type == "" {
-		writeJSON(w, http.StatusBadRequest, PushDeliveryResponse{
-			Status: "failed",
-			Error: &PushError{
-				Code:    "invalid_request",
-				Message: "job id and type are required",
-			},
-		})
-		return
-	}
-
-	if err := h.inner.processJob(r.Context(), job); err != nil {
-		h.inner.logger.Error("job processing failed",
-			"job_id", job.ID,
-			"job_type", job.Type,
-			"error", err,
-		)
-		writeJSON(w, http.StatusOK, PushDeliveryResponse{
-			Status: "failed",
-			Error: &PushError{
-				Code:      "handler_error",
-				Message:   err.Error(),
-				Retryable: true,
-			},
-		})
-		return
-	}
-
-	h.inner.logger.Info("job completed",
-		"job_id", job.ID,
-		"job_type", job.Type,
-	)
-	writeJSON(w, http.StatusOK, PushDeliveryResponse{
-		Status: "completed",
+	h.inner.servePush(w, r, pushBinding{
+		decode:       decodeBareJob,
+		decodeErrMsg: "failed to decode job event",
 	})
 }
 

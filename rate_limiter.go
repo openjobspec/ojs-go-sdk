@@ -2,9 +2,12 @@ package ojs
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"errors"
 	"log/slog"
 	"math"
-	"math/rand/v2"
+	"net"
 	"net/http"
 	"time"
 )
@@ -57,14 +60,43 @@ func (rc RetryConfig) retryBackoff(attempt int, retryAfter time.Duration) time.D
 	}
 
 	// Decorrelated jitter: multiply by random factor in [0.5, 1.0)
-	jitter := 0.5 + rand.Float64()*0.5
-	return time.Duration(float64(backoff) * jitter)
+	return time.Duration(backoff * jitterFactor())
+}
+
+// jitterFactor returns a retry-backoff multiplier in [0.5, 1.0).
+//
+// The value comes from the system CSPRNG so the SDK seeds no package-level PRNG
+// of its own. Cost is irrelevant here: jitter is computed only on the rare
+// 429/5xx retry path, immediately before sleeping for hundreds of milliseconds.
+func jitterFactor() float64 {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Unreachable as of Go 1.24, where crypto/rand.Read cannot fail. Full
+		// backoff is the safe fallback: it never retries sooner than the
+		// unjittered schedule would.
+		return 1.0
+	}
+	// Keep the top 53 bits so the quotient is exactly representable as a
+	// float64 in [0, 1).
+	return 0.5 + float64(binary.BigEndian.Uint64(b[:])>>11)/(1<<53)*0.5
 }
 
 // shouldRetry returns true if the response status code is retryable and retries remain.
 // Retryable: 429 (Too Many Requests), 502, 503, 504 (transient server errors).
-func (rc RetryConfig) shouldRetry(statusCode int, attempt int) bool {
+//
+// A 429 with a syntactically valid Retry-After is the narrow exception to the
+// operation-safety gate: it is an explicit server instruction to retry after
+// throttling and applies to every method. Other retryable statuses remain
+// gated by retryEligible because a 5xx response may arrive after a
+// non-idempotent POST was committed.
+func (rc RetryConfig) shouldRetry(statusCode int, attempt int, retryEligible, retryAfterValid bool) bool {
 	if !rc.Enabled || attempt >= rc.MaxRetries {
+		return false
+	}
+	if statusCode == http.StatusTooManyRequests && retryAfterValid {
+		return true
+	}
+	if !retryEligible {
 		return false
 	}
 	if statusCode == http.StatusTooManyRequests {
@@ -77,6 +109,36 @@ func (rc RetryConfig) shouldRetry(statusCode int, attempt int) bool {
 		}
 	}
 	return false
+}
+
+// shouldRetryConnectionError reports whether a transport-level failure --  no
+// HTTP response at all, as opposed to an error status code -- is safe to
+// retry.
+//
+// A pre-dial failure (DNS lookup failure, connection refused, or any other
+// error establishing the TCP/TLS connection) is safe to retry regardless of
+// the operation: the connection was never established, so the request was
+// never transmitted and nothing could have been written. Every other
+// transport failure -- a write that failed partway, a read timeout waiting
+// for the response, a connection reset after the request was sent -- cannot
+// be told apart from "the server received and processed the request but the
+// response was lost in transit", so it is retried only when retryEligible
+// already says the operation itself is safe to repeat regardless of a prior
+// attempt's outcome.
+func shouldRetryConnectionError(err error, retryEligible bool) bool {
+	if isPreDialFailure(err) {
+		return true
+	}
+	return retryEligible
+}
+
+// isPreDialFailure reports whether err represents a failure to establish a
+// connection -- including the DNS lookup that precedes it -- rather than a
+// failure once the connection existed and bytes may have started flowing.
+// net/http always surfaces these as a *net.OpError with Op == "dial".
+func isPreDialFailure(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Op == "dial"
 }
 
 // sleepWithContext sleeps for the given duration, returning early if ctx is cancelled.

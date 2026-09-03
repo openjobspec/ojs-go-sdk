@@ -1,7 +1,10 @@
 version: 2
 updates:
   - package-ecosystem: "gomod"
-    directory: "/"
+    directories:
+      - "/"
+      - "/grpc"
+      - "/middleware/otel"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10

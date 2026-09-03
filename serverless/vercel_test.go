@@ -11,7 +11,7 @@ import (
 )
 
 func TestVercelHandler_ServeHTTP_Success(t *testing.T) {
-	h := NewVercelHandler()
+	h := newInsecureVercelHandler()
 	h.Register("email.send", func(_ context.Context, job JobEvent) error {
 		return nil
 	})
@@ -52,7 +52,7 @@ func TestVercelHandler_ServeHTTP_MethodNotAllowed(t *testing.T) {
 }
 
 func TestVercelHandler_ServeHTTP_InvalidJSON(t *testing.T) {
-	h := NewVercelHandler()
+	h := newInsecureVercelHandler()
 
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{broken`))
 	req.Header.Set("Content-Type", "application/json")
@@ -66,7 +66,7 @@ func TestVercelHandler_ServeHTTP_InvalidJSON(t *testing.T) {
 }
 
 func TestVercelHandler_ServeHTTP_MissingJobFields(t *testing.T) {
-	h := NewVercelHandler()
+	h := newInsecureVercelHandler()
 
 	// Missing type
 	body := `{"job":{"id":"job-1","queue":"default","args":[],"attempt":1},"worker_id":"w1","delivery_id":"d1"}`
@@ -89,7 +89,7 @@ func TestVercelHandler_ServeHTTP_MissingJobFields(t *testing.T) {
 }
 
 func TestVercelHandler_ServeHTTP_HandlerError(t *testing.T) {
-	h := NewVercelHandler()
+	h := newInsecureVercelHandler()
 	h.Register("fail.job", func(_ context.Context, _ JobEvent) error {
 		return fmt.Errorf("something went wrong")
 	})
@@ -117,7 +117,7 @@ func TestVercelHandler_ServeHTTP_HandlerError(t *testing.T) {
 }
 
 func TestVercelHandler_ServeHTTP_NoHandler(t *testing.T) {
-	h := NewVercelHandler()
+	h := newInsecureVercelHandler()
 
 	body := `{"job":{"id":"job-1","type":"unknown","queue":"default","args":[],"attempt":1},"worker_id":"w1","delivery_id":"d1"}`
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
@@ -139,7 +139,7 @@ func TestVercelHandler_ServeHTTP_NoHandler(t *testing.T) {
 }
 
 func TestVercelHandler_ServeHTTP_VercelRequestID(t *testing.T) {
-	h := NewVercelHandler()
+	h := newInsecureVercelHandler()
 
 	var capturedID string
 	h.Register("trace.job", func(ctx context.Context, _ JobEvent) error {
@@ -163,7 +163,7 @@ func TestVercelHandler_ServeHTTP_VercelRequestID(t *testing.T) {
 }
 
 func TestVercelHandler_ServeHTTP_NoVercelRequestID(t *testing.T) {
-	h := NewVercelHandler()
+	h := newInsecureVercelHandler()
 
 	var capturedID string
 	h.Register("trace.job", func(ctx context.Context, _ JobEvent) error {

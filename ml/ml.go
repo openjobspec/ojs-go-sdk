@@ -319,34 +319,17 @@ func WithCompute(cfg ComputeConfig) ojs.EnqueueOption {
 }
 
 // ValidateResources checks that resource requirements are logically consistent.
+//
+// Each accelerator block is self-contained, so it is validated by the function
+// that owns it; what remains here are the host-level amounts. Rule order is
+// unchanged, so a request that breaks several rules reports the same first
+// failure as before.
 func ValidateResources(req ResourceRequirements) error {
-	if req.GPU != nil {
-		if req.GPU.Count < 0 {
-			return fmt.Errorf("ml: gpu count must be non-negative, got %d", req.GPU.Count)
-		}
-		if req.GPU.MemoryGB < 0 {
-			return fmt.Errorf("ml: gpu memory_gb must be non-negative, got %f", req.GPU.MemoryGB)
-		}
-		if req.GPU.MemoryGB > 0 && req.GPU.Count == 0 {
-			return fmt.Errorf("ml: gpu memory_gb requires count > 0")
-		}
-		if req.GPU.Type != "" && req.GPU.Count == 0 {
-			return fmt.Errorf("ml: gpu type requires count > 0")
-		}
-		if req.GPU.ComputeCapability != "" && req.GPU.Count == 0 {
-			return fmt.Errorf("ml: gpu compute_capability requires count > 0")
-		}
-		if req.GPU.Interconnect != "" && req.GPU.Count < 2 {
-			return fmt.Errorf("ml: gpu interconnect requires count >= 2")
-		}
+	if err := validateGPURequirements(req.GPU); err != nil {
+		return err
 	}
-	if req.TPU != nil {
-		if req.TPU.ChipCount < 0 {
-			return fmt.Errorf("ml: tpu chip_count must be non-negative, got %d", req.TPU.ChipCount)
-		}
-		if req.TPU.Topology != "" && req.TPU.Type == "" {
-			return fmt.Errorf("ml: tpu topology requires type to be set")
-		}
+	if err := validateTPURequirements(req.TPU); err != nil {
+		return err
 	}
 	if req.CPU != nil && req.CPU.Cores < 0 {
 		return fmt.Errorf("ml: cpu cores must be non-negative, got %d", req.CPU.Cores)
@@ -359,6 +342,49 @@ func ValidateResources(req ResourceRequirements) error {
 	}
 	if req.ShmSizeGB < 0 {
 		return fmt.Errorf("ml: shm_size_gb must be non-negative, got %f", req.ShmSizeGB)
+	}
+	return nil
+}
+
+// validateGPURequirements checks a GPU block: the amounts must be provisionable
+// and every GPU-qualifying attribute needs enough GPUs to apply to. A nil block
+// requests no GPUs and is always valid.
+func validateGPURequirements(gpu *GPURequirements) error {
+	if gpu == nil {
+		return nil
+	}
+	if gpu.Count < 0 {
+		return fmt.Errorf("ml: gpu count must be non-negative, got %d", gpu.Count)
+	}
+	if gpu.MemoryGB < 0 {
+		return fmt.Errorf("ml: gpu memory_gb must be non-negative, got %f", gpu.MemoryGB)
+	}
+	if gpu.MemoryGB > 0 && gpu.Count == 0 {
+		return fmt.Errorf("ml: gpu memory_gb requires count > 0")
+	}
+	if gpu.Type != "" && gpu.Count == 0 {
+		return fmt.Errorf("ml: gpu type requires count > 0")
+	}
+	if gpu.ComputeCapability != "" && gpu.Count == 0 {
+		return fmt.Errorf("ml: gpu compute_capability requires count > 0")
+	}
+	if gpu.Interconnect != "" && gpu.Count < 2 {
+		return fmt.Errorf("ml: gpu interconnect requires count >= 2")
+	}
+	return nil
+}
+
+// validateTPURequirements checks a TPU block for internal consistency. A nil
+// block requests no TPUs and is always valid.
+func validateTPURequirements(tpu *TPURequirements) error {
+	if tpu == nil {
+		return nil
+	}
+	if tpu.ChipCount < 0 {
+		return fmt.Errorf("ml: tpu chip_count must be non-negative, got %d", tpu.ChipCount)
+	}
+	if tpu.Topology != "" && tpu.Type == "" {
+		return fmt.Errorf("ml: tpu topology requires type to be set")
 	}
 	return nil
 }

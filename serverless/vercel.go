@@ -2,7 +2,6 @@ package serverless
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"time"
@@ -36,6 +35,36 @@ func WithVercelTimeout(d time.Duration) VercelOption {
 func WithVercelMaxBodySize(n int64) VercelOption {
 	return func(h *VercelHandler) {
 		h.inner.maxBodySize = n
+	}
+}
+
+// WithVercelHandlerOptions applies shared HTTP push authentication settings.
+func WithVercelHandlerOptions(options HandlerOptions) VercelOption {
+	return func(h *VercelHandler) {
+		h.inner.applyHandlerOptions(options)
+	}
+}
+
+// WithVercelPushSigningSecrets replaces the secrets accepted for OJS HTTP push
+// signatures.
+func WithVercelPushSigningSecrets(secrets ...string) VercelOption {
+	return func(h *VercelHandler) {
+		h.inner.setPushSigningSecrets(secrets)
+	}
+}
+
+// WithVercelPushFreshnessWindow sets the permitted timestamp clock skew.
+func WithVercelPushFreshnessWindow(window time.Duration) VercelOption {
+	return func(h *VercelHandler) {
+		h.inner.pushFreshnessWindow = window
+	}
+}
+
+// WithVercelInsecureAllowUnsignedPushForLocalDevelopment disables HTTP push
+// authentication. It must only be used for local development and tests.
+func WithVercelInsecureAllowUnsignedPushForLocalDevelopment() VercelOption {
+	return func(h *VercelHandler) {
+		h.inner.insecureAllowUnsignedPushForLocalDevelopment = true
 	}
 }
 
@@ -81,67 +110,20 @@ func (h *VercelHandler) Register(jobType string, handler HandlerFunc) {
 // and dispatches them to registered handlers. The Vercel request ID is propagated
 // via the request context when the X-Vercel-Id header is present.
 func (h *VercelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+	h.inner.servePush(w, r, pushBinding{
+		decode:         decodePushDelivery,
+		decodeErrMsg:   "failed to decode request body",
+		requestContext: vercelRequestContext,
+	})
+}
 
-	body := http.MaxBytesReader(w, r.Body, h.inner.maxBodySize)
-	var req PushDeliveryRequest
-	if err := json.NewDecoder(body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, PushDeliveryResponse{
-			Status: "failed",
-			Error: &PushError{
-				Code:      "invalid_request",
-				Message:   "failed to decode request body",
-				Retryable: false,
-			},
-		})
-		return
-	}
-
-	if req.Job.ID == "" || req.Job.Type == "" {
-		writeJSON(w, http.StatusBadRequest, PushDeliveryResponse{
-			Status: "failed",
-			Error: &PushError{
-				Code:      "invalid_request",
-				Message:   "job id and type are required",
-				Retryable: false,
-			},
-		})
-		return
-	}
-
-	// Propagate Vercel request ID in context for tracing.
+// vercelRequestContext propagates the Vercel request ID for tracing.
+func vercelRequestContext(r *http.Request) context.Context {
 	ctx := r.Context()
 	if vercelID := r.Header.Get("X-Vercel-Id"); vercelID != "" {
 		ctx = context.WithValue(ctx, vercelRequestIDKey, vercelID)
 	}
-
-	if err := h.inner.processJob(ctx, req.Job); err != nil {
-		h.inner.logger.Error("job processing failed",
-			"job_id", req.Job.ID,
-			"job_type", req.Job.Type,
-			"error", err,
-		)
-		writeJSON(w, http.StatusOK, PushDeliveryResponse{
-			Status: "failed",
-			Error: &PushError{
-				Code:      "handler_error",
-				Message:   err.Error(),
-				Retryable: true,
-			},
-		})
-		return
-	}
-
-	h.inner.logger.Info("job completed",
-		"job_id", req.Job.ID,
-		"job_type", req.Job.Type,
-	)
-	writeJSON(w, http.StatusOK, PushDeliveryResponse{
-		Status: "completed",
-	})
+	return ctx
 }
 
 // HandleJob processes a single OJS job directly, without HTTP transport.
